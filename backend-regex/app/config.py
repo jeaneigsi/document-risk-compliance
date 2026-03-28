@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     storage_indices_path: str = "./storage/indices"
     storage_cache_path: str = "./storage/cache"
     storage_experiments_db_path: str = "./storage/experiments.db"
+    storage_compare_runs_db_path: str = "./storage/compare_runs.db"
     upload_max_pdf_mb: int = 50
     upload_max_image_mb: int = 10
     pdf_render_default_scale: float = 1.6

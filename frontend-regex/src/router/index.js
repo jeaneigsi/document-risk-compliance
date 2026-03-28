@@ -56,7 +56,7 @@ const routes = [
     meta: { title: 'Comparer 2 documents', icon: 'mdi-file-compare' },
   },
   {
-    path: '/compare/result',
+    path: '/compare/result/:runId?',
     name: 'compare-result',
     component: () => import('@/views/CompareResultView.vue'),
     meta: { title: 'Résultat comparaison', icon: 'mdi-file-search-outline' },

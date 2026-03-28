@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
+from app.compare.history import init_compare_history_db
 from app.eval.history import init_experiment_history_db
 
 
@@ -19,6 +20,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     print(f"NextPlaid URL: {settings.next_plaid_url}")
     print(f"Redis URL: {settings.redis_url}")
     init_experiment_history_db()
+    init_compare_history_db()
     yield
     # Shutdown
     print("Shutting down application")

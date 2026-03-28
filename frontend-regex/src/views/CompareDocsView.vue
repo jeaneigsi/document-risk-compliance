@@ -75,7 +75,7 @@ async function analyze() {
   loading.value = true
   error.value = ''
   try {
-    const { data } = await compareApi.analyze({
+    const { data } = await compareApi.createRun({
       left_document_id: leftDocumentId.value,
       right_document_id: rightDocumentId.value,
       model: selectedModel.value,
@@ -83,6 +83,8 @@ async function analyze() {
       strategy: strategy.value,
     })
     store.setCompareSession({
+      runId: data.run_id,
+      status: data.status,
       leftDocument: leftDocument.value,
       rightDocument: rightDocument.value,
       leftDocumentId: leftDocumentId.value,
@@ -90,9 +92,9 @@ async function analyze() {
       model: selectedModel.value,
       indexName: indexName.value,
       strategy: strategy.value,
-      result: data,
+      result: data.result || null,
     })
-    await router.push({ name: 'compare-result' })
+    await router.push({ name: 'compare-result', params: { runId: data.run_id } })
   } catch (e) {
     error.value = e.response?.data?.detail || e.message
   } finally {

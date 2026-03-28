@@ -1,31 +1,40 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
-import PdfPageViewer from '@/components/PdfPageViewer.vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { compareApi, documentsApi } from '@/services/api'
 import { useAppStore } from '@/stores/app'
 
+const PdfPageViewer = defineAsyncComponent(() => import('@/components/PdfPageViewer.vue'))
+
 const store = useAppStore()
+const route = useRoute()
 const router = useRouter()
 
 const session = computed(() => store.compareSession)
-const result = computed(() => session.value?.result || null)
+const runId = computed(() => String(route.params.runId || session.value?.runId || ''))
+const run = ref(session.value?.runId === runId.value ? session.value : null)
+
+const result = computed(() => run.value?.result || null)
 const leftDocument = computed(() => session.value?.leftDocument || null)
 const rightDocument = computed(() => session.value?.rightDocument || null)
-const leftDocumentId = computed(() => session.value?.leftDocumentId || '')
-const rightDocumentId = computed(() => session.value?.rightDocumentId || '')
-const sessionModel = computed(() => session.value?.model || 'openrouter/qwen/qwen3.5-9b:exacto')
-const sessionIndexName = computed(() => session.value?.indexName || 'default')
+const leftDocumentId = computed(() => run.value?.left_document_id || session.value?.leftDocumentId || '')
+const rightDocumentId = computed(() => run.value?.right_document_id || session.value?.rightDocumentId || '')
+const sessionModel = computed(() => run.value?.model || session.value?.model || 'openrouter/qwen/qwen3.5-9b:exacto')
+const sessionIndexName = computed(() => run.value?.index_name || session.value?.indexName || 'default')
 
 const leftLayout = ref(session.value?.leftLayout || null)
 const rightLayout = ref(session.value?.rightLayout || null)
 const selectedChangeId = ref('')
 const leftPage = ref(1)
 const rightPage = ref(1)
+const runLoading = ref(false)
+const runError = ref('')
 const rerunLoading = ref(false)
 const rerunError = ref('')
 const rerunStrategy = ref('')
 const debugOpen = ref(false)
+
+let pollHandle = null
 
 const changes = computed(() => result.value?.changes || [])
 const hasChanges = computed(() => changes.value.length > 0)
@@ -33,6 +42,20 @@ const selectedChange = computed(() =>
   changes.value.find((change) => change.change_id === selectedChangeId.value) || null
 )
 const summary = computed(() => result.value?.summary || {})
+const runStatus = computed(() => run.value?.status || '')
+const showPendingState = computed(() => ['queued', 'running'].includes(runStatus.value))
+const summaryText = computed(() => String(result.value?.llm_summary || '').trim())
+const summaryItems = computed(() => {
+  if (!summaryText.value) return []
+  return summaryText.value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^[-*•]\s*/, ''))
+})
+const summaryLooksLikeList = computed(() =>
+  summaryItems.value.length > 1 || /^[-*•]\s/.test(summaryText.value)
+)
 const strategyItems = [
   { title: 'Hybrid', value: 'hybrid' },
   { title: 'Semantic', value: 'semantic' },
@@ -55,6 +78,13 @@ function buildHighlights(evidenceRows, pageNumber, color) {
     .filter((row) => row.bbox_2d)
 }
 
+function syncSession(partial) {
+  store.setCompareSession({
+    ...(session.value || {}),
+    ...partial,
+  })
+}
+
 async function ensureLayout(documentId, side) {
   if (!documentId) return
   const current = side === 'left' ? leftLayout.value : rightLayout.value
@@ -63,37 +93,66 @@ async function ensureLayout(documentId, side) {
     const { data } = await documentsApi.getLayout(documentId)
     if (side === 'left') leftLayout.value = data
     else rightLayout.value = data
-    if (session.value) {
-      store.setCompareSession({
-        ...session.value,
-        leftLayout: side === 'left' ? data : leftLayout.value,
-        rightLayout: side === 'right' ? data : rightLayout.value,
-      })
-    }
+    syncSession({
+      leftLayout: side === 'left' ? data : leftLayout.value,
+      rightLayout: side === 'right' ? data : rightLayout.value,
+    })
   } catch (e) {
     console.error('compare result layout load failed', e)
   }
 }
 
-onMounted(() => {
-  ensureLayout(leftDocumentId.value, 'left')
-  ensureLayout(rightDocumentId.value, 'right')
-})
-
-watch(result, (value) => {
-  if (!value?.changes?.length) {
-    selectedChangeId.value = ''
-    return
+function clearPoll() {
+  if (pollHandle) {
+    window.clearTimeout(pollHandle)
+    pollHandle = null
   }
-  selectedChangeId.value = value.changes[0].change_id
-  rerunStrategy.value = session.value?.strategy || value?.strategy || 'hybrid'
-}, { immediate: true })
+}
 
-watch(selectedChange, (change) => {
-  if (!change) return
-  leftPage.value = Number(change.left_page || 1)
-  rightPage.value = Number(change.right_page || 1)
-})
+function schedulePoll() {
+  clearPoll()
+  if (!showPendingState.value || !runId.value) return
+  pollHandle = window.setTimeout(() => {
+    void loadRun({ silent: true })
+  }, 1500)
+}
+
+async function loadRun({ silent = false } = {}) {
+  if (!runId.value) return
+  if (!silent) {
+    runLoading.value = true
+    runError.value = ''
+  }
+  try {
+    const { data } = await compareApi.getRun(runId.value)
+    run.value = data
+    syncSession({
+      runId: data.run_id,
+      status: data.status,
+      leftDocumentId: data.left_document_id,
+      rightDocumentId: data.right_document_id,
+      model: data.model || sessionModel.value,
+      indexName: data.index_name,
+      strategy: data.strategy,
+      result: data.result || null,
+      error: data.error || '',
+      leftLayout: leftLayout.value,
+      rightLayout: rightLayout.value,
+    })
+    if (data.error) runError.value = data.error
+    if (data.result) {
+      await Promise.all([
+        ensureLayout(data.left_document_id, 'left'),
+        ensureLayout(data.right_document_id, 'right'),
+      ])
+    }
+  } catch (e) {
+    runError.value = e.response?.data?.detail || e.message
+  } finally {
+    if (!silent) runLoading.value = false
+    schedulePoll()
+  }
+}
 
 function backToSetup() {
   router.push({ name: 'compare' })
@@ -104,24 +163,76 @@ async function rerunAnalyze() {
   rerunLoading.value = true
   rerunError.value = ''
   try {
-    const { data } = await compareApi.analyze({
+    const { data } = await compareApi.createRun({
       left_document_id: leftDocumentId.value,
       right_document_id: rightDocumentId.value,
       model: sessionModel.value,
       index_name: sessionIndexName.value,
       strategy: rerunStrategy.value,
     })
-    store.setCompareSession({ ...session.value, strategy: rerunStrategy.value, result: data })
+    syncSession({
+      runId: data.run_id,
+      status: data.status,
+      strategy: rerunStrategy.value,
+      result: data.result || null,
+    })
+    await router.replace({ name: 'compare-result', params: { runId: data.run_id } })
   } catch (e) {
     rerunError.value = e.response?.data?.detail || e.message
   } finally {
     rerunLoading.value = false
   }
 }
+
+onMounted(() => {
+  void loadRun()
+})
+
+onBeforeUnmount(() => {
+  clearPoll()
+})
+
+watch(runId, () => {
+  void loadRun()
+})
+
+watch(result, (value) => {
+  if (!value?.changes?.length) {
+    selectedChangeId.value = ''
+    return
+  }
+  if (!value.changes.some((change) => change.change_id === selectedChangeId.value)) {
+    selectedChangeId.value = value.changes[0].change_id
+  }
+  rerunStrategy.value = run.value?.strategy || session.value?.strategy || value?.strategy || 'hybrid'
+}, { immediate: true })
+
+watch(selectedChange, (change) => {
+  if (!change) return
+  leftPage.value = Number(change.left_page || 1)
+  rightPage.value = Number(change.right_page || 1)
+})
 </script>
 
 <template>
-  <div v-if="!result" class="empty-root">
+  <div v-if="runLoading && !run" class="empty-root">
+    <div class="empty-card">
+      <v-progress-circular indeterminate color="primary" size="52" width="4" />
+      <h2 class="mt-4 text-h6 font-weight-bold">Chargement du run</h2>
+      <p class="text-body-2 text-medium-emphasis mt-1 mb-0">Le résultat est récupéré depuis le backend.</p>
+    </div>
+  </div>
+
+  <div v-else-if="runError && !run" class="empty-root">
+    <div class="empty-card">
+      <v-icon size="56" color="error" icon="mdi-alert-circle-outline" />
+      <h2 class="mt-4 text-h6 font-weight-bold">Run indisponible</h2>
+      <p class="text-body-2 text-medium-emphasis mt-1 mb-5">{{ runError }}</p>
+      <v-btn color="primary" variant="flat" prepend-icon="mdi-arrow-left" @click="backToSetup">Retour</v-btn>
+    </div>
+  </div>
+
+  <div v-else-if="!result && !showPendingState" class="empty-root">
     <div class="empty-card">
       <v-icon size="56" color="primary" icon="mdi-file-compare" />
       <h2 class="mt-4 text-h6 font-weight-bold">Aucune comparaison active</h2>
@@ -133,166 +244,202 @@ async function rerunAnalyze() {
   <div v-else class="app-root">
     <header class="app-header">
       <div class="app-header__left">
-        <v-btn icon="mdi-arrow-left" variant="text" density="compact" @click="backToSetup" />
+        <v-btn icon="mdi-arrow-left" variant="text" size="small" color="white" @click="backToSetup" />
+        <v-icon icon="mdi-file-compare" size="20" class="ml-1" />
         <span class="app-header__title">Changements détectés</span>
       </div>
       <div class="app-header__stats">
-        <span class="pill" :class="hasChanges ? 'pill--danger' : 'pill--success'">{{ summary.change_count || 0 }} changements</span>
-        <span class="pill pill--muted">{{ summary.latency_ms || 0 }} ms</span>
-        <span class="pill pill--muted">{{ result.usage?.total_tokens || 0 }} tokens</span>
+        <span class="pill" :class="hasChanges ? 'pill--danger' : 'pill--success'">
+          <v-icon size="13" :icon="hasChanges ? 'mdi-alert-circle' : 'mdi-check-circle'" class="mr-1" />
+          {{ summary.change_count || 0 }} changements
+        </span>
+        <span class="pill pill--muted">
+          <v-icon size="13" icon="mdi-timer-outline" class="mr-1" />
+          {{ summary.latency_ms || 0 }} ms
+        </span>
+        <span class="pill pill--muted">
+          <v-icon size="13" icon="mdi-counter" class="mr-1" />
+          {{ result?.usage?.total_tokens || 0 }} tokens
+        </span>
+        <span class="pill pill--accent">
+          <v-icon size="13" icon="mdi-lightning-bolt" class="mr-1" />
+          {{ run?.strategy || session?.strategy || result?.strategy || 'hybrid' }}
+        </span>
       </div>
       <div class="app-header__right">
         <v-select
           v-model="rerunStrategy"
           :items="strategyItems"
-          density="compact"
+          density="default"
           variant="outlined"
           hide-details
           class="strat-sel"
+          prepend-inner-icon="mdi-strategy"
         />
         <v-btn
-          color="primary"
+          color="white"
           variant="flat"
-          density="compact"
+          density="default"
           prepend-icon="mdi-refresh"
           :loading="rerunLoading"
           @click="rerunAnalyze"
+          class="rerun-btn"
         >
           Relancer
         </v-btn>
       </div>
     </header>
 
-    <v-alert v-if="rerunError" type="error" variant="tonal" density="compact" class="ma-3">
-      {{ rerunError }}
+    <v-alert v-if="runError || rerunError" type="error" variant="tonal" density="compact" class="ma-3">
+      {{ rerunError || runError }}
     </v-alert>
 
-    <div class="summary-strip">
-      <div class="summary-strip__main">
-        <div class="summary-strip__label">Synthèse</div>
-        <div class="summary-strip__text">{{ result.llm_summary || 'Aucune synthèse disponible.' }}</div>
+    <v-alert v-if="showPendingState" type="info" variant="tonal" density="comfortable" class="ma-3">
+      <div class="pending-alert">
+        <div>
+          <strong>{{ runStatus === 'queued' ? 'Run en file d’attente' : 'Comparaison en cours' }}</strong>
+          <div class="text-body-2 text-medium-emphasis">
+            Le backend aligne les blocs et calcule les diffs. Le résultat s’affichera automatiquement.
+          </div>
+        </div>
+        <v-progress-circular indeterminate color="primary" size="20" width="3" />
       </div>
-      <div v-if="result.groups?.length" class="summary-strip__groups">
-        <span v-for="group in result.groups" :key="group.key" class="group-chip">{{ group.key }} · {{ group.count }}</span>
-      </div>
-    </div>
+    </v-alert>
 
-    <div class="workspace">
-      <aside class="change-rail">
-        <div class="change-rail__head">
-          <span>Changements</span>
-          <span class="change-rail__count">{{ changes.length }}</span>
-        </div>
-        <div v-if="hasChanges" class="change-rail__scroll">
-          <button
-            v-for="change in changes"
-            :key="change.change_id"
-            type="button"
-            class="change-card"
-            :class="{ 'change-card--active': selectedChangeId === change.change_id }"
-            @click="selectedChangeId = change.change_id"
-          >
-            <div class="change-card__top">
-              <span class="change-card__title" :title="change.title">{{ change.title }}</span>
-              <span class="change-card__importance" :class="`change-card__importance--${change.importance || 'medium'}`">
-                {{ change.importance || 'medium' }}
-              </span>
-            </div>
-            <div class="change-card__meta">
-              <span class="change-meta-chip">{{ change.change_subtype }}</span>
-              <span v-if="change.left_page || change.right_page" class="change-meta-chip">
-                p.{{ change.left_page || '?' }} / p.{{ change.right_page || '?' }}
-              </span>
-              <span v-if="change.change_type !== 'modified'" class="change-meta-chip">{{ change.change_type }}</span>
-            </div>
-            <div class="change-card__summary" :title="change.summary">{{ change.summary }}</div>
-          </button>
-        </div>
-        <div v-else class="change-rail__empty">
-          <v-icon size="22" icon="mdi-check-circle-outline" color="success" />
-          <div class="change-rail__empty-title">Aucun changement significatif</div>
-          <div class="change-rail__empty-copy">
-            Les blocs alignés ne montrent pas de différence exploitable entre les deux documents.
-          </div>
-        </div>
-      </aside>
-
-      <div class="pdf-area">
-        <div class="detail-bar" v-if="selectedChange">
-          <div class="detail-bar__title">{{ selectedChange.title }}</div>
-          <div class="detail-bar__summary">{{ selectedChange.summary }}</div>
-        </div>
-        <div v-else class="detail-bar detail-bar--empty">
-          <div class="detail-bar__title">Documents alignés</div>
-          <div class="detail-bar__summary">Aucun changement significatif détecté. Utilise “Relancer” avec une autre stratégie si tu veux tester un autre alignement.</div>
-        </div>
-
-        <div class="pdf-split">
-          <div class="pdf-pane">
-            <PdfPageViewer
-              title="Document A"
-              :document-id="leftDocumentId"
-              :filename="leftDocument?.filename || ''"
-              :page="leftPage"
-              :total-pages="leftLayout?.num_pages || leftDocument?.total_pages || leftDocument?.num_pages || 0"
-              :highlights="leftHighlights"
-              :viewer-height="'clamp(32rem, 72vh, 56rem)'"
-              @update:page="leftPage = $event"
-            />
-          </div>
-          <div class="pdf-pane">
-            <PdfPageViewer
-              title="Document B"
-              :document-id="rightDocumentId"
-              :filename="rightDocument?.filename || ''"
-              :page="rightPage"
-              :total-pages="rightLayout?.num_pages || rightDocument?.total_pages || rightDocument?.num_pages || 0"
-              :highlights="rightHighlights"
-              :viewer-height="'clamp(32rem, 72vh, 56rem)'"
-              @update:page="rightPage = $event"
-            />
-          </div>
-        </div>
-
-        <div class="detail-panel" v-if="selectedChange">
-          <div class="detail-grid">
-            <div class="detail-card">
-              <div class="detail-card__label">Avant</div>
-              <div class="detail-card__text">{{ selectedChange.left_raw || '—' }}</div>
-            </div>
-            <div class="detail-card">
-              <div class="detail-card__label">Après</div>
-              <div class="detail-card__text">{{ selectedChange.right_raw || '—' }}</div>
+    <template v-if="result">
+      <div class="summary-strip">
+        <div class="summary-strip__main">
+          <div class="summary-strip__label">Synthèse</div>
+          <div v-if="summaryLooksLikeList" class="summary-strip__list">
+            <div v-for="(item, index) in summaryItems" :key="`${index}-${item}`" class="summary-strip__item">
+              <span class="summary-strip__bullet" />
+              <span class="summary-strip__item-text">{{ item }}</span>
             </div>
           </div>
-
-          <div v-if="selectedChange.lexical_diff_ops?.length" class="diff-inline">
-            <span
-              v-for="(op, index) in selectedChange.lexical_diff_ops"
-              :key="`${selectedChange.change_id}-${index}`"
-              class="diff-inline__op"
-              :class="{
-                'diff-inline__op--insert': op.op === 'insert',
-                'diff-inline__op--delete': op.op === 'delete',
-                'diff-inline__op--equal': op.op === 'equal',
-              }"
-            >{{ op.text }}</span>
-          </div>
-
-          <button type="button" class="debug-toggle" @click="debugOpen = !debugOpen">
-            <v-icon size="15" :icon="debugOpen ? 'mdi-chevron-up' : 'mdi-chevron-down'" />
-            Détails techniques
-          </button>
-
-          <div v-if="debugOpen" class="debug-grid">
-            <div class="debug-item"><span>Alignment</span><strong>{{ selectedChange.alignment_source }}</strong></div>
-            <div class="debug-item"><span>Confidence</span><strong>{{ selectedChange.alignment_confidence }}</strong></div>
-            <div class="debug-item"><span>Field</span><strong>{{ selectedChange.field_type }}</strong></div>
-            <div class="debug-item"><span>Reason</span><strong>{{ selectedChange.pairing_reason || 'n/a' }}</strong></div>
-          </div>
+          <div v-else class="summary-strip__text">{{ summaryText || 'Aucune synthèse disponible.' }}</div>
+        </div>
+        <div v-if="result.groups?.length" class="summary-strip__groups">
+          <span v-for="group in result.groups" :key="group.key" class="group-chip">{{ group.key }} · {{ group.count }}</span>
         </div>
       </div>
-    </div>
+
+      <div class="workspace">
+        <aside class="change-rail">
+          <div class="change-rail__head">
+            <span>Changements</span>
+            <span class="change-rail__count">{{ changes.length }}</span>
+          </div>
+          <div v-if="hasChanges" class="change-rail__scroll">
+            <button
+              v-for="change in changes"
+              :key="change.change_id"
+              type="button"
+              class="change-card"
+              :class="{ 'change-card--active': selectedChangeId === change.change_id }"
+              @click="selectedChangeId = change.change_id"
+            >
+              <div class="change-card__top">
+                <span class="change-card__title" :title="change.title">{{ change.title }}</span>
+                <span class="change-card__importance" :class="`change-card__importance--${change.importance || 'medium'}`">
+                  {{ change.importance || 'medium' }}
+                </span>
+              </div>
+              <div class="change-card__meta">
+                <span class="change-meta-chip">{{ change.change_subtype }}</span>
+                <span v-if="change.left_page || change.right_page" class="change-meta-chip">
+                  p.{{ change.left_page || '?' }} / p.{{ change.right_page || '?' }}
+                </span>
+                <span v-if="change.change_type !== 'modified'" class="change-meta-chip">{{ change.change_type }}</span>
+              </div>
+              <div class="change-card__summary" :title="change.summary">{{ change.summary }}</div>
+            </button>
+          </div>
+          <div v-else class="change-rail__empty">
+            <v-icon size="22" icon="mdi-check-circle-outline" color="success" />
+            <div class="change-rail__empty-title">Aucun changement significatif</div>
+            <div class="change-rail__empty-copy">
+              Les blocs alignés ne montrent pas de différence exploitable entre les deux documents.
+            </div>
+          </div>
+        </aside>
+
+        <div class="pdf-area">
+          <div class="detail-bar" v-if="selectedChange">
+            <div class="detail-bar__title">{{ selectedChange.title }}</div>
+            <div class="detail-bar__summary">{{ selectedChange.summary }}</div>
+          </div>
+          <div v-else class="detail-bar detail-bar--empty">
+            <div class="detail-bar__title">Documents alignés</div>
+            <div class="detail-bar__summary">Aucun changement significatif détecté. Utilise “Relancer” avec une autre stratégie si tu veux tester un autre alignement.</div>
+          </div>
+
+          <div class="pdf-split">
+            <div class="pdf-pane">
+              <PdfPageViewer
+                title="Document A"
+                :document-id="leftDocumentId"
+                :filename="leftDocument?.filename || ''"
+                :page="leftPage"
+                :total-pages="leftLayout?.num_pages || leftDocument?.total_pages || leftDocument?.num_pages || 0"
+                :highlights="leftHighlights"
+                :viewer-height="'clamp(32rem, 72vh, 56rem)'"
+                @update:page="leftPage = $event"
+              />
+            </div>
+            <div class="pdf-pane">
+              <PdfPageViewer
+                title="Document B"
+                :document-id="rightDocumentId"
+                :filename="rightDocument?.filename || ''"
+                :page="rightPage"
+                :total-pages="rightLayout?.num_pages || rightDocument?.total_pages || rightDocument?.num_pages || 0"
+                :highlights="rightHighlights"
+                :viewer-height="'clamp(32rem, 72vh, 56rem)'"
+                @update:page="rightPage = $event"
+              />
+            </div>
+          </div>
+
+          <div class="detail-panel" v-if="selectedChange">
+            <div class="detail-grid">
+              <div class="detail-card">
+                <div class="detail-card__label">Avant</div>
+                <div class="detail-card__text">{{ selectedChange.left_raw || '—' }}</div>
+              </div>
+              <div class="detail-card">
+                <div class="detail-card__label">Après</div>
+                <div class="detail-card__text">{{ selectedChange.right_raw || '—' }}</div>
+              </div>
+            </div>
+
+            <div v-if="selectedChange.lexical_diff_ops?.length" class="diff-inline">
+              <span
+                v-for="(op, index) in selectedChange.lexical_diff_ops"
+                :key="`${selectedChange.change_id}-${index}`"
+                class="diff-inline__op"
+                :class="{
+                  'diff-inline__op--insert': op.op === 'insert',
+                  'diff-inline__op--delete': op.op === 'delete',
+                  'diff-inline__op--equal': op.op === 'equal',
+                }"
+              >{{ op.text }}</span>
+            </div>
+
+            <button type="button" class="debug-toggle" @click="debugOpen = !debugOpen">
+              <v-icon size="15" :icon="debugOpen ? 'mdi-chevron-up' : 'mdi-chevron-down'" />
+              Détails techniques
+            </button>
+
+            <div v-if="debugOpen" class="debug-grid">
+              <div class="debug-item"><span>Alignment</span><strong>{{ selectedChange.alignment_source }}</strong></div>
+              <div class="debug-item"><span>Confidence</span><strong>{{ selectedChange.alignment_confidence }}</strong></div>
+              <div class="debug-item"><span>Field</span><strong>{{ selectedChange.field_type }}</strong></div>
+              <div class="debug-item"><span>Reason</span><strong>{{ selectedChange.pairing_reason || 'n/a' }}</strong></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -324,9 +471,9 @@ async function rerunAnalyze() {
 .app-header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 16px;
-  min-height: 52px;
+  gap: 20px;
+  padding: 0 24px;
+  min-height: 60px;
   background: #0f172a;
   color: #e2e8f0;
 }
@@ -335,12 +482,13 @@ async function rerunAnalyze() {
 .app-header__right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
 }
 
 .app-header__title {
   font-weight: 700;
-  font-size: 0.95rem;
+  font-size: 1rem;
+  letter-spacing: -0.01em;
 }
 
 .app-header__stats {
@@ -352,43 +500,88 @@ async function rerunAnalyze() {
 }
 
 .strat-sel {
-  width: 130px;
+  width: 160px;
 }
 
 .strat-sel :deep(.v-field) {
   background: rgba(255, 255, 255, 0.08) !important;
-  border-color: rgba(255, 255, 255, 0.15) !important;
+  border-color: rgba(255, 255, 255, 0.2) !important;
   color: #e2e8f0;
+  border-radius: 8px;
+  min-height: 38px;
+}
+
+.strat-sel :deep(.v-field__input) {
+  color: #e2e8f0 !important;
+  font-size: 0.82rem;
+  padding-top: 4px;
+  padding-bottom: 4px;
 }
 
 .pill {
   display: inline-flex;
   align-items: center;
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 0.72rem;
-  font-weight: 700;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  gap: 5px;
+  line-height: 1.2;
 }
 
 .pill--danger {
-  background: rgba(239, 68, 68, 0.18);
+  background: rgba(239, 68, 68, 0.2);
   color: #fecaca;
 }
 
 .pill--muted {
-  background: rgba(148, 163, 184, 0.12);
+  background: rgba(148, 163, 184, 0.15);
   color: #cbd5e1;
 }
 
 .pill--success {
-  background: rgba(22, 163, 74, 0.18);
+  background: rgba(34, 197, 94, 0.2);
   color: #bbf7d0;
+}
+
+.pill--accent {
+  background: rgba(99, 102, 241, 0.25);
+  color: #c4b5fd;
+}
+
+.rerun-btn {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  text-transform: none;
+  font-size: 0.82rem;
+  padding: 0 22px !important;
+  height: 38px !important;
+  border-radius: 8px !important;
+  background: rgba(255, 255, 255, 0.12) !important;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #fff !important;
+  box-shadow: none !important;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.rerun-btn:hover {
+  background: rgba(255, 255, 255, 0.22) !important;
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.pending-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
 }
 
 .summary-strip {
   display: grid;
-  gap: 0.75rem;
-  padding: 0.9rem 1rem;
+  gap: 0.65rem;
+  padding: 1rem 1.5rem;
   border-bottom: 1px solid #e2e8f0;
   background: #fff;
 }
@@ -407,6 +600,35 @@ async function rerunAnalyze() {
   line-height: 1.6;
   color: #334155;
   white-space: pre-wrap;
+}
+
+.summary-strip__list {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.35rem;
+}
+
+.summary-strip__item {
+  display: grid;
+  grid-template-columns: 0.55rem minmax(0, 1fr);
+  gap: 0.55rem;
+  align-items: start;
+}
+
+.summary-strip__bullet {
+  width: 0.4rem;
+  height: 0.4rem;
+  margin-top: 0.42rem;
+  border-radius: 999px;
+  background: #2563eb;
+}
+
+.summary-strip__item-text {
+  min-width: 0;
+  font-size: 0.88rem;
+  line-height: 1.55;
+  color: #334155;
+  overflow-wrap: anywhere;
 }
 
 .summary-strip__groups {
@@ -466,9 +688,9 @@ async function rerunAnalyze() {
 .change-rail__scroll {
   flex: 1;
   overflow-y: auto;
-  padding: 0.4rem;
+  padding: 0.5rem;
   display: grid;
-  gap: 0.35rem;
+  gap: 0.45rem;
 }
 
 .change-rail__empty {
@@ -492,31 +714,33 @@ async function rerunAnalyze() {
 
 .change-card {
   display: grid;
-  gap: 0.28rem;
-  padding: 0.55rem 0.65rem;
+  gap: 0.35rem;
+  padding: 0.65rem 0.75rem;
   border: 1px solid #e2e8f0;
-  border-radius: 0.7rem;
+  border-radius: 10px;
   background: #fff;
   text-align: left;
   cursor: pointer;
   min-width: 0;
+  transition: background 0.1s, border-color 0.1s;
 }
 
 .change-card:hover {
   background: #f8fafc;
-  border-color: #e2e8f0;
+  border-color: #cbd5e1;
 }
 
 .change-card--active {
   background: #eff6ff;
   border-color: #93c5fd;
+  box-shadow: 0 0 0 1px #93c5fd;
 }
 
 .change-card__top,
 .change-card__meta {
   display: flex;
   align-items: center;
-  gap: 0.18rem;
+  gap: 0.25rem;
   flex-wrap: wrap;
 }
 
@@ -527,18 +751,18 @@ async function rerunAnalyze() {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 1;
   overflow: hidden;
-  font-size: 0.76rem;
+  font-size: 0.78rem;
   font-weight: 700;
   color: #1e293b;
-  line-height: 1.25;
+  line-height: 1.3;
 }
 
 .change-card__importance {
   display: inline-flex;
   align-items: center;
-  padding: 0.08rem 0.34rem;
-  border-radius: 999px;
-  font-size: 0.58rem;
+  padding: 0.12rem 0.42rem;
+  border-radius: 6px;
+  font-size: 0.62rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -572,24 +796,25 @@ async function rerunAnalyze() {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0.05rem 0.28rem;
-  border-radius: 999px;
+  padding: 0.12rem 0.38rem;
+  border-radius: 6px;
   background: #f8fafc;
   border: 1px solid #e2e8f0;
-  font-size: 0.58rem;
-  line-height: 1.1;
+  font-size: 0.64rem;
+  line-height: 1.2;
   color: #64748b;
   white-space: nowrap;
+  font-weight: 500;
 }
 
 .change-card__summary {
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 1;
+  -webkit-line-clamp: 2;
   overflow: hidden;
-  font-size: 0.67rem;
-  line-height: 1.3;
-  color: #475569;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  color: #64748b;
 }
 
 .pdf-area {

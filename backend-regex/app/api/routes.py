@@ -1,5 +1,6 @@
 """API routes for document processing - Phase 2: OCR & Parsing with MinIO."""
 
+import asyncio
 import mimetypes
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Response, BackgroundTasks
@@ -10,6 +11,7 @@ import uuid
 import json
 
 from app.compare import CompareDocumentsPipeline
+from app.compare.history import CompareRunRepository
 from app.config import get_settings
 from app.detect import DetectionPipeline
 from app.eval.baseline import BaselineLexicalRetriever
@@ -197,6 +199,29 @@ class CompareAnalyzeRequest(BaseModel):
     strategy: str = "hybrid"
 
 
+class CompareRunSummaryResponse(BaseModel):
+    run_id: str
+    created_at: str
+    updated_at: str
+    status: str
+    left_document_id: str
+    right_document_id: str
+    strategy: str
+    index_name: str
+    model: Optional[str] = None
+    error: Optional[str] = None
+
+
+class CompareRunDetailResponse(CompareRunSummaryResponse):
+    config: dict = Field(default_factory=dict)
+    result: Optional[dict] = None
+
+
+class CompareRunListResponse(BaseModel):
+    count: int
+    runs: list[CompareRunSummaryResponse]
+
+
 class EvalSearchSampleRequest(BaseModel):
     """One retrieval evaluation sample."""
     sample_id: str
@@ -285,6 +310,33 @@ def _prepare_compare_document(storage, document_id: str):
         markdown=extracted.get("markdown", ""),
         layout=extracted.get("layout", []),
     )
+
+
+def _run_compare_in_background(run_id: str) -> None:
+    repo = CompareRunRepository()
+    run = repo.get_run(run_id)
+    if not run:
+        return
+
+    repo.mark_running(run_id)
+    try:
+        storage = get_minio_storage()
+        pipeline = CompareDocumentsPipeline()
+        left = _prepare_compare_document(storage, run["left_document_id"])
+        right = _prepare_compare_document(storage, run["right_document_id"])
+        result = asyncio.run(
+            pipeline.analyze(
+                left=left,
+                right=right,
+                strategy=str(run.get("strategy") or "hybrid"),
+                index_name=str(run.get("index_name") or "default"),
+                model=run.get("model"),
+            )
+        )
+        repo.mark_completed(run_id, result)
+    except Exception as exc:  # pragma: no cover
+        logger.exception("compare run failed run_id=%s", run_id)
+        repo.mark_failed(run_id, str(exc))
 
 
 # ============================================================================
@@ -869,6 +921,55 @@ async def compare_analyze(payload: CompareAnalyzeRequest):
         index_name=payload.index_name,
         model=payload.model,
     )
+
+
+@router.post("/compare/runs", response_model=CompareRunDetailResponse, tags=["compare"])
+async def create_compare_run(payload: CompareAnalyzeRequest, background_tasks: BackgroundTasks):
+    """Create an async compare run and process it in the background."""
+    repo = CompareRunRepository()
+    run = repo.create_run(
+        left_document_id=payload.left_document_id,
+        right_document_id=payload.right_document_id,
+        strategy=payload.strategy,
+        index_name=payload.index_name,
+        model=payload.model,
+        config=payload.model_dump(),
+    )
+    background_tasks.add_task(_run_compare_in_background, run["run_id"])
+    return repo.get_run(run["run_id"])
+
+
+@router.get("/compare/runs", response_model=CompareRunListResponse, tags=["compare"])
+async def list_compare_runs(limit: int = 20):
+    """List recent compare runs."""
+    repo = CompareRunRepository()
+    runs = repo.list_runs(limit=limit)
+    summaries = [
+        {
+            "run_id": item["run_id"],
+            "created_at": item["created_at"],
+            "updated_at": item["updated_at"],
+            "status": item["status"],
+            "left_document_id": item["left_document_id"],
+            "right_document_id": item["right_document_id"],
+            "strategy": item["strategy"],
+            "index_name": item["index_name"],
+            "model": item.get("model"),
+            "error": item.get("error"),
+        }
+        for item in runs
+    ]
+    return {"count": len(summaries), "runs": summaries}
+
+
+@router.get("/compare/runs/{run_id}", response_model=CompareRunDetailResponse, tags=["compare"])
+async def get_compare_run(run_id: str):
+    """Fetch one persisted compare run."""
+    repo = CompareRunRepository()
+    run = repo.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Compare run not found")
+    return run
 
 
 @router.post("/eval/search", tags=["eval"])

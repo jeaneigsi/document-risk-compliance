@@ -60,6 +60,9 @@ export const llmApi = {
 
 export const compareApi = {
   analyze: (payload) => api.post('/compare/analyze', payload),
+  createRun: (payload) => api.post('/compare/runs', payload),
+  getRun: (runId) => api.get(`/compare/runs/${runId}`),
+  listRuns: (limit = 20) => api.get('/compare/runs', { params: { limit } }),
 }
 
 export const evalApi = {
