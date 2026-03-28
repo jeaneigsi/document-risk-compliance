@@ -1,0 +1,688 @@
+{
+  "info": {
+    "_postman_id": "4fb6bfdd-dc26-4f87-8f24-b75bb0f4f625",
+    "name": "Backend Regex - Manual Tests",
+    "description": "Collection manuelle complète classée par dossiers pour tester l'app backend-regex.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "00 - Setup",
+      "item": [
+        {
+          "name": "Set Runtime Vars",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.collectionVariables.set('index_name', 'contracts');",
+                  "pm.collectionVariables.set('query_deadline', 'delivery deadline');",
+                  "pm.collectionVariables.set('query_budget', 'budget approved');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "01 - Health & Info",
+      "item": [
+        {
+          "name": "Health Root",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200', function () { pm.response.to.have.status(200); });",
+                  "var json = pm.response.json();",
+                  "pm.test('status healthy', function () { pm.expect(json.status).to.eql('healthy'); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Health API v1",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200', function () { pm.response.to.have.status(200); });",
+                  "var json = pm.response.json();",
+                  "pm.test('components present', function () {",
+                  "  pm.expect(json).to.have.property('components');",
+                  "  pm.expect(json.components).to.have.property('ocr');",
+                  "  pm.expect(json.components).to.have.property('minio');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "health"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Info API",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200', function () { pm.response.to.have.status(200); });",
+                  "var json = pm.response.json();",
+                  "pm.test('endpoints listed', function () { pm.expect(json).to.have.property('endpoints'); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/info",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "info"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 - Documents",
+      "item": [
+        {
+          "name": "Upload Document (PDF/JPG/PNG)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200', function () { pm.response.to.have.status(200); });",
+                  "var json = pm.response.json();",
+                  "pm.collectionVariables.set('document_id', json.document_id);",
+                  "pm.test('document_id captured', function () { pm.expect(json.document_id).to.be.a('string'); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": ""
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/upload",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "upload"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Document Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/{{document_id}}/status",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "{{document_id}}",
+                "status"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Document Content",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/{{document_id}}/content",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "{{document_id}}",
+                "content"
+              ]
+            }
+          }
+        },
+        {
+          "name": "List Documents",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Delete Document",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/{{document_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "{{document_id}}"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 - Search",
+      "item": [
+        {
+          "name": "Index Evidence Units",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"index_name\": \"{{index_name}}\",\n  \"evidence_units\": [\n    {\n      \"evidence_id\": \"ev-1\",\n      \"document_id\": \"doc-a\",\n      \"content\": \"Delivery deadline is 2026-04-01.\",\n      \"source_type\": \"text_span\",\n      \"page_number\": 1,\n      \"metadata\": {\"section\": \"planning\"}\n    },\n    {\n      \"evidence_id\": \"ev-2\",\n      \"document_id\": \"doc-b\",\n      \"content\": \"Budget approved amount is 900 EUR.\",\n      \"source_type\": \"text_span\",\n      \"page_number\": 2,\n      \"metadata\": {\"section\": \"finance\"}\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/search/index",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "search",
+                "index"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Search Hybrid",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"{{query_deadline}}\",\n  \"index_name\": \"{{index_name}}\",\n  \"top_k\": 5,\n  \"strategy\": \"hybrid\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/search",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "search"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Search Semantic",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"{{query_budget}}\",\n  \"index_name\": \"{{index_name}}\",\n  \"top_k\": 5,\n  \"strategy\": \"semantic\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/search",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "search"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Search Lexical",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"{{query_deadline}}\",\n  \"index_name\": \"{{index_name}}\",\n  \"top_k\": 5,\n  \"strategy\": \"lexical\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/search",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "search"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 - Detection",
+      "item": [
+        {
+          "name": "Detect Inconsistencies",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"document_id\": \"{{document_id}}\",\n  \"claims\": [\n    \"Le budget approuvé est de 1200 EUR au 2026-03-25\",\n    \"Référence REF-AAA01\"\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/detect",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "detect"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "05 - LLM",
+      "item": [
+        {
+          "name": "Analyze Prompt",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"prompt\": \"Analyze this inconsistency: budget is 1200 in claim and 900 in source.\",\n  \"model\": \"{{llm_model}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/llm/analyze",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "llm",
+                "analyze"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "06 - Evaluation (Phase 7)",
+      "item": [
+        {
+          "name": "Eval Search (Baseline)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"strategy\": \"baseline\",\n  \"top_k\": 5,\n  \"corpus\": [\n    {\"id\": \"doc-1\", \"text\": \"delivery deadline approved\"},\n    {\"id\": \"doc-2\", \"text\": \"budget update only\"}\n  ],\n  \"samples\": [\n    {\n      \"sample_id\": \"s1\",\n      \"query\": \"delivery deadline\",\n      \"relevant_ids\": [\"doc-1\"],\n      \"relevance_by_id\": {\"doc-1\": 1.0},\n      \"index_name\": \"default\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/eval/search",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "eval",
+                "search"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Eval Detection (P/R/F1)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"gold_labels\": [true, false, true, false],\n  \"predicted_labels\": [true, false, false, false]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/eval/detection",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "eval",
+                "detection"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Eval Economics (tokens/cost/latency)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"runs\": [\n    {\"prompt_tokens\": 100, \"completion_tokens\": 20, \"cost_usd\": 0.01, \"latency_ms\": 300, \"compression_ratio\": 0.4, \"llm_calls\": 1},\n    {\"prompt_tokens\": 200, \"completion_tokens\": 40, \"cost_usd\": 0.02, \"latency_ms\": 500, \"compression_ratio\": 0.5, \"llm_calls\": 2}\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/eval/economics",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "eval",
+                "economics"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "07 - Error Cases",
+      "item": [
+        {
+          "name": "Upload Unsupported Extension",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": ""
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/upload",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "upload"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Status Missing Document",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/does-not-exist/status",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "does-not-exist",
+                "status"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Content Missing Document",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/does-not-exist/content",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "does-not-exist",
+                "content"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Detect Missing Document",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"document_id\": \"missing\",\n  \"claims\": [\"x\"]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/detect",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "detect"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Eval Detection - Label Length Mismatch",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"gold_labels\": [true],\n  \"predicted_labels\": [true, false]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/eval/detection",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "eval",
+                "detection"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "index_name",
+      "value": "contracts"
+    },
+    {
+      "key": "document_id",
+      "value": ""
+    },
+    {
+      "key": "query_deadline",
+      "value": "delivery deadline"
+    },
+    {
+      "key": "query_budget",
+      "value": "budget approved"
+    },
+    {
+      "key": "llm_model",
+      "value": "openrouter/google/gemini-2.0-flash-001"
+    }
+  ]
+}

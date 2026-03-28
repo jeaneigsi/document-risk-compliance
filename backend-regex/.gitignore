@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# uv
+.uv/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Storage (local development)
+storage/documents/*
+storage/indices/*
+storage/cache/*
+!storage/documents/.gitkeep
+!storage/indices/.gitkeep
+!storage/cache/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db

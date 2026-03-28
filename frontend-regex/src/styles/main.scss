@@ -1,0 +1,83 @@
+$body-font-family: 'Inter', 'Roboto', sans-serif;
+
+.v-application {
+  font-family: $body-font-family !important;
+}
+
+.text-gradient {
+  background: linear-gradient(45deg, #1976D2, #82B1FF);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.metric-card {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  
+  &:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
+  }
+}
+
+.chart-container {
+  min-height: 400px;
+  width: 100%;
+}
+
+.upload-zone {
+  border: 2px dashed rgba(25, 118, 210, 0.3);
+  border-radius: 12px;
+  transition: all 0.3s ease;
+  
+  &:hover {
+    border-color: #1976D2;
+    background: rgba(25, 118, 210, 0.04);
+  }
+  
+  &.dragover {
+    border-color: #1976D2;
+    background: rgba(25, 118, 210, 0.08);
+    transform: scale(1.01);
+  }
+}
+
+.experiment-run {
+  border-left: 4px solid #1976D2;
+  
+  &.running {
+    border-left-color: #FFC107;
+  }
+  
+  &.completed {
+    border-left-color: #4CAF50;
+  }
+  
+  &.failed {
+    border-left-color: #FF5252;
+  }
+}
+
+.conf-matrix {
+  display: grid;
+  grid-template-columns: auto 1fr 1fr;
+  gap: 4px;
+  font-size: 14px;
+  
+  .label {
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+  }
+  
+  .cell {
+    padding: 12px;
+    text-align: center;
+    border-radius: 4px;
+    
+    &.tp { background: #E8F5E9; color: #2E7D32; }
+    &.fp { background: #FFEBEE; color: #C62828; }
+    &.tn { background: #E3F2FD; color: #1565C0; }
+    &.fn { background: #FFF3E0; color: #EF6C00; }
+  }
+}

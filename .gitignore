@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+
+# Env & secrets
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Node
+node_modules/
+dist/
+
+# Storage local
+storage/
+*.db
+*.sqlite3
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+*.pyc
+*.pyo

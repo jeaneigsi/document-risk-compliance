@@ -1,0 +1,98 @@
+services:
+  nextplaid:
+    image: ghcr.io/lightonai/next-plaid:cpu-1.0.6
+    container_name: nextplaid-docs-regex
+    ports:
+      - "8081:8080"
+    volumes:
+      - nextplaid_indices:/data/indices
+    networks:
+      - projet-1-network
+    restart: unless-stopped
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--index-dir"
+      - "/data/indices"
+      - "--model"
+      - "lightonai/answerai-colbert-small-v1-onnx"
+      - "--int8"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis-docs-regex
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - projet-1-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio-docs-regex
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+      MINIO_DEFAULT_BUCKETS: documents:public,extracted:private,cache:private
+    networks:
+      - projet-1-network
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # MinIO Client for bucket initialization (optional)
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init-docs-regex
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - projet-1-network
+    restart: "no"
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin123;
+      /usr/bin/mc mb myminio/documents --ignore-existing;
+      /usr/bin/mc mb myminio/extracted --ignore-existing;
+      /usr/bin/mc mb myminio/cache --ignore-existing;
+      /usr/bin/mc anonymous set download myminio/documents;
+      echo 'MinIO buckets initialized';
+      "
+
+volumes:
+  nextplaid_indices:
+    driver: local
+  redis_data:
+    driver: local
+  minio_data:
+    driver: local
+
+networks:
+  projet-1-network:
+    driver: bridge
