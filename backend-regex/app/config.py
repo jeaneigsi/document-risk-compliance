@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     ocr_api_url: str = ""
     ocr_api_timeout: int = 60
     ocr_api_key: str = ""
+    ocr_chunk_pages: int = 12
 
     # LLM
     openrouter_api_key: str = ""
@@ -72,6 +73,10 @@ class Settings(BaseSettings):
     storage_indices_path: str = "./storage/indices"
     storage_cache_path: str = "./storage/cache"
     storage_experiments_db_path: str = "./storage/experiments.db"
+    upload_max_pdf_mb: int = 50
+    upload_max_image_mb: int = 10
+    pdf_render_default_scale: float = 1.6
+    pdf_render_cache_enabled: bool = True
 
     # MinIO S3 Configuration
     minio_endpoint: str = "localhost:9000"

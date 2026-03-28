@@ -32,9 +32,12 @@ export const documentsApi = {
   list: () => api.get('/documents'),
   getStatus: (id) => api.get(`/documents/${id}/status`),
   getContent: (id) => api.get(`/documents/${id}/content`),
+  getLayout: (id) => api.get(`/documents/${id}/layout`),
   delete: (id) => api.delete(`/documents/${id}`),
   retryExtract: (id) => api.post(`/documents/${id}/extract/retry`),
   retryIndex: (id, indexName = 'default') => api.post(`/documents/${id}/index/retry`, { index_name: indexName }),
+  renderPageUrl: (id, page, scale = 1.6) =>
+    `${settings.apiBaseUrl}/documents/${id}/pages/${page}/render?scale=${encodeURIComponent(scale)}`,
 }
 
 export const searchApi = {
@@ -52,6 +55,11 @@ export const detectApi = {
 export const llmApi = {
   analyze: (prompt, model) => api.post('/llm/analyze', { prompt, model }),
   analyzeDocument: (payload) => api.post('/llm/analyze/document', payload),
+}
+
+export const compareApi = {
+  suggestClaims: (payload) => api.post('/compare/suggest-claims', payload),
+  analyze: (payload) => api.post('/compare/analyze', payload),
 }
 
 export const evalApi = {

@@ -1,8 +1,10 @@
 """Z.ai OCR client for document layout parsing."""
 
 import base64
+import os
+import tempfile
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Callable, List, Optional, Union
 import logging
 
 import httpx
@@ -23,6 +25,14 @@ logger = logging.getLogger(__name__)
 
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
+
+
+def _load_fitz():
+    try:
+        import fitz  # type: ignore
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("PyMuPDF (fitz) is required for PDF chunking/rendering") from exc
+    return fitz
 
 
 class ZaiOCRClient:
@@ -103,12 +113,16 @@ class ZaiOCRClient:
         if not path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        # Check file size (50MB max for PDF, 10MB for images)
+        # Check file size against configured limits.
         size_mb = path.stat().st_size / (1024 * 1024)
-        if path.suffix.lower() == ".pdf" and size_mb > 50:
-            raise ValueError(f"PDF file too large: {size_mb:.1f}MB (max 50MB)")
-        elif path.suffix.lower() not in [".pdf"] and size_mb > 10:
-            raise ValueError(f"Image file too large: {size_mb:.1f}MB (max 10MB)")
+        if path.suffix.lower() == ".pdf" and size_mb > settings.upload_max_pdf_mb:
+            raise ValueError(
+                f"PDF file too large: {size_mb:.1f}MB (max {settings.upload_max_pdf_mb}MB)"
+            )
+        elif path.suffix.lower() not in [".pdf"] and size_mb > settings.upload_max_image_mb:
+            raise ValueError(
+                f"Image file too large: {size_mb:.1f}MB (max {settings.upload_max_image_mb}MB)"
+            )
 
         with open(path, "rb") as f:
             encoded = base64.b64encode(f.read()).decode("utf-8")
@@ -138,6 +152,45 @@ class ZaiOCRClient:
             start = end + 1
 
         return ranges
+
+    @staticmethod
+    def _get_pdf_page_count(file_path: Union[str, Path]) -> int:
+        path = Path(file_path)
+        fitz = _load_fitz()
+        document = fitz.open(path)
+        try:
+            return len(document)
+        finally:
+            document.close()
+
+    @staticmethod
+    def _split_pdf_to_temp_files(
+        file_path: Union[str, Path],
+        max_pages: int,
+    ) -> list[tuple[PageRange, str]]:
+        fitz = _load_fitz()
+        path = Path(file_path)
+        source = fitz.open(path)
+        temp_files: list[tuple[PageRange, str]] = []
+        try:
+            total_pages = len(source)
+            for page_range in ZaiOCRClient._calculate_page_ranges(total_pages, max_pages=max_pages):
+                chunk_doc = fitz.open()
+                try:
+                    chunk_doc.insert_pdf(
+                        source,
+                        from_page=page_range.start - 1,
+                        to_page=page_range.end - 1,
+                    )
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                        temp_path = tmp_file.name
+                    chunk_doc.save(temp_path)
+                    temp_files.append((page_range, temp_path))
+                finally:
+                    chunk_doc.close()
+            return temp_files
+        finally:
+            source.close()
 
     @staticmethod
     def _normalize_bbox(bbox: list[float], page_width: float | None, page_height: float | None) -> list[float]:
@@ -207,6 +260,7 @@ class ZaiOCRClient:
         return_crop_images: bool = False,
         need_layout_visualization: bool = False,
         user_id: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
     ) -> OCRResponse:
         """
         Parse a document (PDF or image) with OCR.
@@ -224,6 +278,27 @@ class ZaiOCRClient:
         Returns:
             OCRResponse with parsed content and layout
         """
+        max_chunk_pages = max(1, int(getattr(settings, "ocr_chunk_pages", MAX_PAGES_PER_REQUEST)))
+        file_path = Path(file) if not is_url else None
+
+        if not is_url and file_path and file_path.suffix.lower() == ".pdf":
+            total_pages = self._get_pdf_page_count(file_path)
+            if total_pages > max_chunk_pages:
+                logger.info(
+                    "Local PDF has %s pages, pre-splitting into chunks of %s pages before OCR upload",
+                    total_pages,
+                    max_chunk_pages,
+                )
+                return await self._process_local_pdf_chunks(
+                    file_path=file_path,
+                    total_pages=total_pages,
+                    max_pages=max_chunk_pages,
+                    return_crop_images=return_crop_images,
+                    need_layout_visualization=need_layout_visualization,
+                    user_id=user_id,
+                    progress_callback=progress_callback,
+                )
+
         # Prepare file input
         if is_url:
             file_input = str(file)
@@ -252,18 +327,90 @@ class ZaiOCRClient:
         return await self._process_chunked_pdf(
             file_input=file_input,
             total_pages=total_pages,
+            max_pages=max_chunk_pages,
             return_crop_images=return_crop_images,
             need_layout_visualization=need_layout_visualization,
             user_id=user_id,
+            progress_callback=progress_callback,
+        )
+
+    async def _process_local_pdf_chunks(
+        self,
+        file_path: Path,
+        total_pages: int,
+        max_pages: int,
+        return_crop_images: bool = False,
+        need_layout_visualization: bool = False,
+        user_id: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    ) -> OCRResponse:
+        temp_chunks = self._split_pdf_to_temp_files(file_path=file_path, max_pages=max_pages)
+        all_md_results: list[str] = []
+        all_layout_details: list[list[LayoutElement]] = []
+        all_pages_info: list = []
+        usage_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        first_response: OCRResponse | None = None
+        processed_pages = 0
+
+        async with httpx.AsyncClient(timeout=self._build_timeout()) as client:
+            try:
+                for page_range, chunk_path in temp_chunks:
+                    logger.info(
+                        "Uploading OCR chunk %s-%s from split PDF",
+                        page_range.start,
+                        page_range.end,
+                    )
+                    if progress_callback:
+                        progress_callback(processed_pages, total_pages, f"ocr_chunk_{page_range.start}_{page_range.end}")
+
+                    chunk_input = self._encode_file_to_base64(chunk_path)
+                    response = await self._make_request(
+                        OCRRequest(
+                            model="glm-ocr",
+                            file=chunk_input,
+                            return_crop_images=return_crop_images,
+                            need_layout_visualization=need_layout_visualization,
+                            user_id=user_id,
+                        ),
+                        client=client,
+                    )
+                    if first_response is None:
+                        first_response = response
+                    all_md_results.append(response.md_results)
+                    all_layout_details.extend(response.layout_details)
+                    if response.data_info and response.data_info.pages:
+                        all_pages_info.extend(response.data_info.pages)
+                    if response.usage:
+                        usage_totals["prompt_tokens"] += int(response.usage.prompt_tokens)
+                        usage_totals["completion_tokens"] += int(response.usage.completion_tokens)
+                        usage_totals["total_tokens"] += int(response.usage.total_tokens)
+                    processed_pages += page_range.page_count
+                    if progress_callback:
+                        progress_callback(processed_pages, total_pages, "ocr_chunk_completed")
+            finally:
+                for _, temp_path in temp_chunks:
+                    if temp_path and os.path.exists(temp_path):
+                        os.unlink(temp_path)
+
+        return OCRResponse(
+            id=first_response.id if first_response else "merged",
+            created=first_response.created if first_response else 0,
+            model=first_response.model if first_response else "glm-ocr",
+            md_results="\n\n".join(part for part in all_md_results if part),
+            layout_details=all_layout_details,
+            data_info={"pages": all_pages_info} if all_pages_info else None,
+            usage=usage_totals if any(usage_totals.values()) else None,
         )
 
     async def _process_chunked_pdf(
         self,
         file_input: str,
         total_pages: int,
+        max_pages: int,
         return_crop_images: bool = False,
         need_layout_visualization: bool = False,
         user_id: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
     ) -> OCRResponse:
         """
         Process a large PDF in chunks and merge results.
@@ -278,14 +425,18 @@ class ZaiOCRClient:
         Returns:
             Merged OCRResponse
         """
-        ranges = self._calculate_page_ranges(total_pages)
+        ranges = self._calculate_page_ranges(total_pages, max_pages=max_pages)
         all_md_results: List[str] = []
         all_layout_details: List[List[LayoutElement]] = []
         all_pages_info: List = []
+        first_response: OCRResponse | None = None
+        processed_pages = 0
 
         async with httpx.AsyncClient(timeout=self._build_timeout()) as client:
             for page_range in ranges:
                 logger.info(f"Processing pages {page_range.start}-{page_range.end} ({page_range.page_count} pages)")
+                if progress_callback:
+                    progress_callback(processed_pages, total_pages, f"ocr_chunk_{page_range.start}_{page_range.end}")
 
                 response = await self._make_request(
                     OCRRequest(
@@ -299,19 +450,24 @@ class ZaiOCRClient:
                     ),
                     client=client,
                 )
+                if first_response is None:
+                    first_response = response
 
                 all_md_results.append(response.md_results)
                 all_layout_details.extend(response.layout_details)
                 if response.data_info and response.data_info.pages:
                     all_pages_info.extend(response.data_info.pages)
+                processed_pages += page_range.page_count
+                if progress_callback:
+                    progress_callback(processed_pages, total_pages, "ocr_chunk_completed")
 
         # Merge results
         merged_md = "\n\n".join(all_md_results)
 
         return OCRResponse(
-            id=all_pages_info[0].get("id") if all_pages_info else "merged",
-            created=all_pages_info[0].get("created") if all_pages_info else 0,
-            model="glm-ocr",
+            id=first_response.id if first_response else "merged",
+            created=first_response.created if first_response else 0,
+            model=first_response.model if first_response else "glm-ocr",
             md_results=merged_md,
             layout_details=all_layout_details,
             data_info={"pages": all_pages_info} if all_pages_info else None,

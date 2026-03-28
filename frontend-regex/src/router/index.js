@@ -50,6 +50,18 @@ const routes = [
     meta: { title: 'Analyse LLM', icon: 'mdi-robot' },
   },
   {
+    path: '/compare',
+    name: 'compare',
+    component: () => import('@/views/CompareDocsView.vue'),
+    meta: { title: 'Compare 2 Docs', icon: 'mdi-file-compare' },
+  },
+  {
+    path: '/compare/result',
+    name: 'compare-result',
+    component: () => import('@/views/CompareResultView.vue'),
+    meta: { title: 'Résultat comparaison', icon: 'mdi-file-search-outline' },
+  },
+  {
     path: '/settings',
     name: 'settings',
     component: () => import('@/views/SettingsView.vue'),

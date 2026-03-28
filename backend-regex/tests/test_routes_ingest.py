@@ -234,6 +234,115 @@ class TestDocumentContent:
         assert response.status_code == 404
 
 
+class TestDocumentLayout:
+    """Tests for layout and page rendering endpoints."""
+
+    def test_get_layout_success(self, test_client, mock_storage):
+        mock_storage.get_extracted_content.return_value = {
+            "markdown": "# Test\n\nContent here",
+            "layout": [[{"index": 1, "label": "text", "content": "Budget 1200", "bbox_2d": {"x1": 0.1, "y1": 0.2, "x2": 0.3, "y2": 0.4}}]],
+            "metadata": {
+                "num_pages": 1,
+                "ocr_response": {
+                    "data_info": {
+                        "pages": [{"width": 1000, "height": 1400}],
+                    }
+                },
+            },
+        }
+        mock_storage._get_metadata.return_value = {"original_filename": "test.pdf"}
+
+        response = test_client.get("/api/v1/documents/doc_123/layout")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["document_id"] == "doc_123"
+        assert data["num_pages"] == 1
+        assert data["page_infos"][0]["width"] == 1000
+
+    def test_render_document_page_uses_cache(self, test_client, mock_storage):
+        mock_storage._get_metadata.return_value = {"original_filename": "test.pdf"}
+        mock_storage.cache_get.return_value = b"cached-png"
+
+        response = test_client.get("/api/v1/documents/doc_123/pages/1/render")
+
+        assert response.status_code == 200
+        assert response.content == b"cached-png"
+
+
+class TestCompareEndpoints:
+    """Tests for compare-documents endpoints."""
+
+    def test_compare_suggest_claims(self, test_client, mock_storage):
+        mock_storage.get_extracted_content.return_value = {
+            "markdown": "Budget 1200 EUR",
+            "layout": [],
+            "metadata": {"num_pages": 1},
+        }
+        mock_storage._get_metadata.return_value = {"original_filename": "sample.pdf"}
+
+        class FakeComparePipeline:
+            def prepare_document(self, document_id: str, filename: str, markdown: str, layout: list):
+                return {"document_id": document_id, "filename": filename, "markdown": markdown}
+
+            def suggest_claims(self, left, right, limit: int = 8):
+                assert left["document_id"] == "left-doc"
+                assert right["document_id"] == "right-doc"
+                return [{"claim": "The monetary terms are identical in both documents."}]
+
+        with patch("app.api.routes.CompareDocumentsPipeline", return_value=FakeComparePipeline()):
+            response = test_client.post(
+                "/api/v1/compare/suggest-claims",
+                json={"left_document_id": "left-doc", "right_document_id": "right-doc", "limit": 4},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 1
+        assert "monetary terms" in data["suggestions"][0]["claim"]
+
+    def test_compare_analyze(self, test_client, mock_storage):
+        mock_storage.get_extracted_content.return_value = {
+            "markdown": "Budget 1200 EUR",
+            "layout": [],
+            "metadata": {"num_pages": 1},
+        }
+        mock_storage._get_metadata.return_value = {"original_filename": "sample.pdf"}
+
+        class FakeComparePipeline:
+            def prepare_document(self, document_id: str, filename: str, markdown: str, layout: list):
+                return {"document_id": document_id, "filename": filename, "markdown": markdown}
+
+            async def analyze(self, left, right, claims, auto_diff, strategy, index_name, top_k, model):
+                assert left["document_id"] == "left-doc"
+                assert right["document_id"] == "right-doc"
+                assert strategy == "hybrid"
+                return {
+                    "status": "completed",
+                    "issues": [{"issue_id": "issue-1", "claim": "Budget is identical", "verdict": "inconsistent"}],
+                    "summary": {"inconsistent_count": 1, "latency_ms": 50},
+                    "usage": {"total_tokens": 100},
+                }
+
+        with patch("app.api.routes.CompareDocumentsPipeline", return_value=FakeComparePipeline()):
+            response = test_client.post(
+                "/api/v1/compare/analyze",
+                json={
+                    "left_document_id": "left-doc",
+                    "right_document_id": "right-doc",
+                    "claims": ["Budget is identical"],
+                    "auto_diff": True,
+                    "strategy": "hybrid",
+                    "top_k": 5,
+                },
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "completed"
+        assert data["issues"][0]["issue_id"] == "issue-1"
+
+
 class TestDocumentDelete:
     """Tests for DELETE /documents/{id} endpoint."""
 

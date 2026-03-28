@@ -1,12 +1,13 @@
 """API routes for document processing - Phase 2: OCR & Parsing with MinIO."""
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Response, BackgroundTasks
 from pydantic import BaseModel, Field
 from typing import Optional
 import logging
 import uuid
 import json
 
+from app.compare import CompareDocumentsPipeline
 from app.config import get_settings
 from app.detect import DetectionPipeline
 from app.eval.baseline import BaselineLexicalRetriever
@@ -81,6 +82,15 @@ class DocumentContentResponse(BaseModel):
     num_pages: int
     num_elements: int
     extracted_at: str
+
+
+class DocumentLayoutResponse(BaseModel):
+    """Detailed OCR layout for page-aware viewers."""
+    document_id: str
+    filename: str
+    num_pages: int
+    page_infos: list[dict] = Field(default_factory=list)
+    layout: list = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):
@@ -177,6 +187,23 @@ class LLMAnalyzeDocumentResponse(BaseModel):
     usage: dict
 
 
+class CompareSuggestClaimsRequest(BaseModel):
+    left_document_id: str
+    right_document_id: str
+    limit: int = 8
+
+
+class CompareAnalyzeRequest(BaseModel):
+    left_document_id: str
+    right_document_id: str
+    claims: list[str] = Field(default_factory=list)
+    auto_diff: bool = True
+    model: Optional[str] = None
+    index_name: str = "default"
+    strategy: str = "hybrid"
+    top_k: int = 5
+
+
 class EvalSearchSampleRequest(BaseModel):
     """One retrieval evaluation sample."""
     sample_id: str
@@ -246,6 +273,27 @@ async def get_minio():
     return get_minio_storage()
 
 
+def _document_filename(storage, document_id: str) -> str:
+    doc_metadata = storage._get_metadata(document_id, storage.bucket_documents)
+    if isinstance(doc_metadata, dict):
+        return str(doc_metadata.get("original_filename") or doc_metadata.get("saved_filename") or "unknown")
+    return "unknown"
+
+
+def _prepare_compare_document(storage, document_id: str):
+    extracted = storage.get_extracted_content(document_id)
+    if not extracted:
+        raise HTTPException(status_code=404, detail=f"Document content not found for {document_id}")
+    filename = _document_filename(storage, document_id)
+    pipeline = CompareDocumentsPipeline()
+    return pipeline.prepare_document(
+        document_id=document_id,
+        filename=filename,
+        markdown=extracted.get("markdown", ""),
+        layout=extracted.get("layout", []),
+    )
+
+
 # ============================================================================
 # Endpoints
 # ============================================================================
@@ -280,7 +328,7 @@ async def upload_document(
     Upload a document for OCR and processing.
 
     Supported formats: PDF, JPG, PNG
-    Max file size: 50MB for PDF, 10MB for images
+    Max file size: configurable via application settings
 
     The document will be:
     1. Stored in MinIO (documents bucket)
@@ -288,7 +336,11 @@ async def upload_document(
     3. Results stored in MinIO (extracted bucket)
     """
     # Validate file size
-    max_size = 50 * 1024 * 1024 if file.filename.endswith(".pdf") else 10 * 1024 * 1024
+    max_size = (
+        settings.upload_max_pdf_mb * 1024 * 1024
+        if file.filename.endswith(".pdf")
+        else settings.upload_max_image_mb * 1024 * 1024
+    )
     content = await file.read()
 
     if len(content) > max_size:
@@ -522,6 +574,71 @@ async def get_document_content(document_id: str):
     )
 
 
+@router.get("/documents/{document_id}/layout", response_model=DocumentLayoutResponse)
+async def get_document_layout(document_id: str):
+    """Return OCR layout and page metadata for page-aware viewers."""
+    storage = get_minio_storage()
+    content = storage.get_extracted_content(document_id)
+    if not content:
+        raise HTTPException(status_code=404, detail="Document content not found")
+
+    metadata = content.get("metadata", {}) or {}
+    ocr_response = metadata.get("ocr_response", {}) or {}
+    page_infos = ((ocr_response.get("data_info") or {}).get("pages") or []) if isinstance(ocr_response, dict) else []
+
+    return DocumentLayoutResponse(
+        document_id=document_id,
+        filename=_document_filename(storage, document_id),
+        num_pages=int(metadata.get("num_pages", 0) or len(content.get("layout", []))),
+        page_infos=page_infos,
+        layout=content.get("layout", []),
+    )
+
+
+@router.get("/documents/{document_id}/pages/{page_number}/render")
+async def render_document_page(document_id: str, page_number: int, scale: float | None = None):
+    """Render one PDF page as PNG for the compare viewer."""
+    if page_number < 1:
+        raise HTTPException(status_code=400, detail="page_number must be >= 1")
+
+    storage = get_minio_storage()
+    filename = _document_filename(storage, document_id)
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=422, detail="Page rendering currently supports PDF documents only")
+
+    effective_scale = float(scale or settings.pdf_render_default_scale)
+    cache_key = f"renders/page-{page_number}-scale-{effective_scale:.2f}.png"
+    if settings.pdf_render_cache_enabled:
+        cached = storage.cache_get(document_id, cache_key)
+        if cached:
+            return Response(content=cached, media_type="image/png")
+
+    file_bytes = storage.get_file_content(document_id)
+    if file_bytes is None:
+        raise HTTPException(status_code=404, detail="Document source file not found")
+
+    try:
+        import fitz  # type: ignore
+    except ImportError as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail="PyMuPDF is required for PDF rendering") from exc
+
+    document = fitz.open(stream=file_bytes, filetype="pdf")
+    try:
+        if page_number > len(document):
+            raise HTTPException(status_code=404, detail="Requested page is out of document range")
+        page = document.load_page(page_number - 1)
+        matrix = fitz.Matrix(effective_scale, effective_scale)
+        pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+        png_bytes = pixmap.tobytes("png")
+    finally:
+        document.close()
+
+    if settings.pdf_render_cache_enabled:
+        storage.cache_set(document_id, cache_key, png_bytes)
+
+    return Response(content=png_bytes, media_type="image/png")
+
+
 @router.delete("/documents/{document_id}")
 async def delete_document(document_id: str):
     """Delete a document and its associated data from MinIO."""
@@ -728,6 +845,42 @@ async def llm_analyze_document(payload: LLMAnalyzeDocumentRequest):
         evidence=evidence_rows,
         content=result["content"],
         usage=result.get("usage", {}),
+    )
+
+
+@router.post("/compare/suggest-claims", tags=["compare"])
+async def compare_suggest_claims(payload: CompareSuggestClaimsRequest):
+    """Suggest business-relevant compare claims from two extracted documents."""
+    storage = get_minio_storage()
+    pipeline = CompareDocumentsPipeline()
+    left = _prepare_compare_document(storage, payload.left_document_id)
+    right = _prepare_compare_document(storage, payload.right_document_id)
+    suggestions = pipeline.suggest_claims(left=left, right=right, limit=payload.limit)
+    return {
+        "status": "completed",
+        "left_document_id": payload.left_document_id,
+        "right_document_id": payload.right_document_id,
+        "count": len(suggestions),
+        "suggestions": suggestions,
+    }
+
+
+@router.post("/compare/analyze", tags=["compare"])
+async def compare_analyze(payload: CompareAnalyzeRequest):
+    """Compare two documents with retrieval-grounded LLM analysis."""
+    storage = get_minio_storage()
+    pipeline = CompareDocumentsPipeline()
+    left = _prepare_compare_document(storage, payload.left_document_id)
+    right = _prepare_compare_document(storage, payload.right_document_id)
+    return await pipeline.analyze(
+        left=left,
+        right=right,
+        claims=payload.claims,
+        auto_diff=payload.auto_diff,
+        strategy=payload.strategy,
+        index_name=payload.index_name,
+        top_k=payload.top_k,
+        model=payload.model,
     )
 
 

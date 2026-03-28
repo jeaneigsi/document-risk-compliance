@@ -169,18 +169,48 @@ def ingest_document(
 
         # Run OCR (handles chunking for large PDFs automatically)
         import asyncio
+        total_pages_hint = 0
+        if not is_url and str(file_path).lower().endswith(".pdf"):
+            try:
+                total_pages_hint = ocr_client._get_pdf_page_count(file_path)
+            except Exception:
+                total_pages_hint = 0
         storage.set_processing_status(
             document_id=document_id,
             status="processing",
             progress=0.45,
+            total_pages=total_pages_hint,
             details={"stage": "ocr_running"},
         )
-        response = asyncio.run(ocr_client.parse_document(
-            file=file_path,
-            is_url=is_url,
-            return_crop_images=False,
-            need_layout_visualization=False,
-        ))
+
+        def _update_ocr_progress(processed_pages: int, total_pages: int, stage: str) -> None:
+            effective_total = int(total_pages or total_pages_hint or 0)
+            progress = 0.45
+            if effective_total > 0:
+                progress = min(0.7, 0.45 + (0.25 * (processed_pages / effective_total)))
+            storage.set_processing_status(
+                document_id=document_id,
+                status="processing",
+                progress=progress,
+                pages_processed=int(processed_pages),
+                total_pages=effective_total,
+                details={"stage": stage},
+            )
+
+        parse_kwargs = {
+            "file": file_path,
+            "is_url": is_url,
+            "return_crop_images": False,
+            "need_layout_visualization": False,
+        }
+        try:
+            parse_kwargs["progress_callback"] = _update_ocr_progress
+            response = asyncio.run(ocr_client.parse_document(**parse_kwargs))
+        except TypeError as exc:
+            if "progress_callback" not in str(exc):
+                raise
+            parse_kwargs.pop("progress_callback", None)
+            response = asyncio.run(ocr_client.parse_document(**parse_kwargs))
 
         # Extract key information
         num_pages = len(response.layout_details)

@@ -86,6 +86,10 @@ def build_evidence_units_from_ocr(
                     metadata={
                         "filename": filename,
                         "layout_index": data.get("index"),
+                        "bbox_2d": data.get("bbox_2d"),
+                        "page_width": data.get("page_width"),
+                        "page_height": data.get("page_height"),
+                        "highlightable": bool(data.get("bbox_2d")),
                     },
                 )
             )
@@ -106,7 +110,11 @@ def build_evidence_units_from_ocr(
                     content=block,
                     source_type="markdown_block",
                     page_number=1,
-                    metadata={"filename": filename, "markdown_block_index": block_idx},
+                    metadata={
+                        "filename": filename,
+                        "markdown_block_index": block_idx,
+                        "highlightable": False,
+                    },
                 )
             )
     elif md_results.strip():
@@ -117,7 +125,7 @@ def build_evidence_units_from_ocr(
                 content=md_results.strip(),
                 source_type="markdown",
                 page_number=1,
-                metadata={"filename": filename},
+                metadata={"filename": filename, "highlightable": False},
             )
         )
 

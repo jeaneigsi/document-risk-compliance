@@ -2,6 +2,19 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { healthApi, documentsApi, searchApi, detectApi, evalApi } from '@/services/api'
 
+const COMPARE_SESSION_STORAGE_KEY = 'docs-regex.compare-session'
+
+function loadStoredCompareSession() {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(COMPARE_SESSION_STORAGE_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    window.localStorage.removeItem(COMPARE_SESSION_STORAGE_KEY)
+    return null
+  }
+}
+
 export const useAppStore = defineStore('app', () => {
   const health = ref(null)
   const loading = ref(false)
@@ -14,6 +27,7 @@ export const useAppStore = defineStore('app', () => {
   const experimentHistory = ref([])
   const experimentHistorySummary = ref(null)
   const currentExperimentRun = ref(null)
+  const compareSession = ref(loadStoredCompareSession())
   const metrics = ref({
     search: {},
     detection: {},
@@ -54,6 +68,9 @@ export const useAppStore = defineStore('app', () => {
               pages_processed: statusData.pages_processed,
               total_pages: statusData.total_pages,
               error: statusData.error,
+              index_status: statusData.index_status,
+              indexed_count: statusData.indexed_count,
+              details: statusData.details,
             }
           } catch {
             return {
@@ -204,6 +221,20 @@ export const useAppStore = defineStore('app', () => {
     return result
   }
 
+  function setCompareSession(session) {
+    compareSession.value = session
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(COMPARE_SESSION_STORAGE_KEY, JSON.stringify(session))
+    }
+  }
+
+  function clearCompareSession() {
+    compareSession.value = null
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem(COMPARE_SESSION_STORAGE_KEY)
+    }
+  }
+
   return {
     health,
     loading,
@@ -216,6 +247,7 @@ export const useAppStore = defineStore('app', () => {
     experimentHistory,
     experimentHistorySummary,
     currentExperimentRun,
+    compareSession,
     metrics,
     isHealthy,
     fetchHealth,
@@ -235,5 +267,7 @@ export const useAppStore = defineStore('app', () => {
     evalSearch,
     evalDetection,
     evalEconomics,
+    setCompareSession,
+    clearCompareSession,
   }
 })

@@ -31,14 +31,18 @@ class NextPlaidClient:
         query: str,
         index_name: str = "default",
         top_k: int = 10,
+        document_ids: list[str] | None = None,
         filters: dict[str, Any] | None = None,
         filter_condition: str | None = None,
         filter_parameters: list[Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Perform semantic search on a NextPlaid index (late-interaction model server-side)."""
         params: dict[str, Any] = {"top_k": top_k}
-        if filters:
-            params["filters"] = filters
+        merged_filters = dict(filters or {})
+        if document_ids:
+            merged_filters["document_id"] = [str(item) for item in document_ids if str(item)]
+        if merged_filters:
+            params["filters"] = merged_filters
         if filter_condition:
             params["filter_condition"] = filter_condition
         if filter_parameters:
@@ -62,7 +66,7 @@ class NextPlaidClient:
                 json={
                     "query": query,
                     "top_k": top_k,
-                    **({"filters": filters} if filters else {}),
+                    **({"filters": merged_filters} if merged_filters else {}),
                 },
             )
             if response.status_code == 404:

@@ -2,6 +2,7 @@
 
 import logging
 from time import perf_counter
+from typing import Iterable
 
 from app.search.evidence import EvidenceUnit
 from app.search.local_registry import LocalSearchRegistry, get_local_search_registry
@@ -10,6 +11,19 @@ from app.search.nextplaid_client import NextPlaidClient
 from app.search.ranking import fuse_search_results, rank_search_results
 
 logger = logging.getLogger(__name__)
+
+
+def _filter_results_by_document_ids(
+    rows: list[dict],
+    document_ids: Iterable[str] | None,
+) -> list[dict]:
+    if not document_ids:
+        return rows
+    allowed = {str(item) for item in document_ids if str(item)}
+    return [
+        row for row in rows
+        if str((row.get("metadata") or {}).get("document_id") or "") in allowed
+    ]
 
 
 class SearchPipeline:
@@ -30,6 +44,7 @@ class SearchPipeline:
         index_name: str = "default",
         top_k: int = 10,
         strategy: str = "hybrid",
+        document_ids: Iterable[str] | None = None,
     ) -> dict:
         """Execute search and return ranked results."""
         start = perf_counter()
@@ -39,6 +54,7 @@ class SearchPipeline:
                 "index_name": index_name,
                 "strategy": strategy,
                 "top_k": top_k,
+                "document_ids": list(document_ids or []),
             },
         ):
             strategy = strategy.lower()
@@ -51,12 +67,23 @@ class SearchPipeline:
 
             if strategy in ("semantic", "hybrid"):
                 try:
-                    semantic_results = await self.client.search(
-                        query=query,
-                        index_name=index_name,
-                        top_k=semantic_top_k_internal if strategy == "hybrid" else top_k,
-                    )
+                    try:
+                        semantic_results = await self.client.search(
+                            query=query,
+                            index_name=index_name,
+                            top_k=semantic_top_k_internal if strategy == "hybrid" else top_k,
+                            document_ids=document_ids,
+                        )
+                    except TypeError as exc:
+                        if "document_ids" not in str(exc):
+                            raise
+                        semantic_results = await self.client.search(
+                            query=query,
+                            index_name=index_name,
+                            top_k=semantic_top_k_internal if strategy == "hybrid" else top_k,
+                        )
                     semantic_candidate_count = len(semantic_results)
+                    semantic_results = _filter_results_by_document_ids(semantic_results, document_ids)
                     semantic_results = rank_search_results(
                         semantic_results,
                         top_k=semantic_top_k_internal if strategy == "hybrid" else top_k,
@@ -74,19 +101,39 @@ class SearchPipeline:
                     )
 
             if strategy in ("lexical", "hybrid"):
-                lexical_results = self.registry.lexical_search(
-                    index_name=index_name,
-                    query=query,
-                    top_k=top_k,
-                )
+                try:
+                    lexical_results = self.registry.lexical_search(
+                        index_name=index_name,
+                        query=query,
+                        top_k=top_k,
+                        document_ids=document_ids,
+                    )
+                except TypeError as exc:
+                    if "document_ids" not in str(exc):
+                        raise
+                    lexical_results = self.registry.lexical_search(
+                        index_name=index_name,
+                        query=query,
+                        top_k=top_k,
+                    )
                 lexical_candidate_count = len(lexical_results)
 
             if strategy == "rg":
-                lexical_results = self.registry.rg_search(
-                    index_name=index_name,
-                    query=query,
-                    top_k=top_k,
-                )
+                try:
+                    lexical_results = self.registry.rg_search(
+                        index_name=index_name,
+                        query=query,
+                        top_k=top_k,
+                        document_ids=document_ids,
+                    )
+                except TypeError as exc:
+                    if "document_ids" not in str(exc):
+                        raise
+                    lexical_results = self.registry.rg_search(
+                        index_name=index_name,
+                        query=query,
+                        top_k=top_k,
+                    )
                 lexical_candidate_count = len(lexical_results)
 
             if strategy == "semantic":
@@ -121,6 +168,7 @@ class SearchPipeline:
                 input_payload={"query": query, "index_name": index_name, "strategy": strategy},
                 metadata={
                     "top_k": top_k,
+                    "document_ids": list(document_ids or []),
                     "latency_ms": latency_ms,
                     "candidate_count": candidate_count,
                     "candidate_kept_count": candidate_kept_count,

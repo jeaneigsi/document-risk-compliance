@@ -1,6 +1,7 @@
 """In-memory registry for lexical search indexes."""
 
 from collections import defaultdict
+from typing import Iterable
 
 from app.search.cursor_like import CursorLikeIndex
 from app.search.evidence import EvidenceUnit
@@ -29,11 +30,37 @@ class LocalSearchRegistry:
         self._indexes[index_name].add_documents(docs)
         return len(docs)
 
-    def lexical_search(self, index_name: str, query: str, top_k: int = 10) -> list[dict]:
-        return self._indexes[index_name].search(query=query, top_k=top_k)
+    @staticmethod
+    def _filter_by_document_ids(results: list[dict], document_ids: Iterable[str] | None) -> list[dict]:
+        if not document_ids:
+            return results
+        allowed = {str(item) for item in document_ids if str(item)}
+        return [
+            row for row in results
+            if str((row.get("metadata") or {}).get("document_id") or "") in allowed
+        ]
 
-    def rg_search(self, index_name: str, query: str, top_k: int = 10) -> list[dict]:
-        return self._indexes[index_name].rg_search(query=query, top_k=top_k)
+    def lexical_search(
+        self,
+        index_name: str,
+        query: str,
+        top_k: int = 10,
+        document_ids: Iterable[str] | None = None,
+    ) -> list[dict]:
+        raw = self._indexes[index_name].search(query=query, top_k=max(top_k * 5, top_k))
+        filtered = self._filter_by_document_ids(raw, document_ids)
+        return filtered[:top_k]
+
+    def rg_search(
+        self,
+        index_name: str,
+        query: str,
+        top_k: int = 10,
+        document_ids: Iterable[str] | None = None,
+    ) -> list[dict]:
+        raw = self._indexes[index_name].rg_search(query=query, top_k=max(top_k * 5, top_k))
+        filtered = self._filter_by_document_ids(raw, document_ids)
+        return filtered[:top_k]
 
 
 _registry = LocalSearchRegistry()

@@ -46,6 +46,7 @@ onMounted(() => {
             { title: 'Recherche', icon: 'mdi-magnify', to: '/search' },
             { title: 'Détection', icon: 'mdi-alert-circle', to: '/detection' },
             { title: 'Analyse LLM', icon: 'mdi-robot', to: '/llm' },
+            { title: 'Compare 2 Docs', icon: 'mdi-file-compare', to: '/compare' },
             { title: 'Expériences', icon: 'mdi-flask', to: '/experiments' },
             { title: 'Paramètres', icon: 'mdi-cog', to: '/settings' },
           ]"
