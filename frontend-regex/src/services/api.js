@@ -33,6 +33,7 @@ export const documentsApi = {
   getStatus: (id) => api.get(`/documents/${id}/status`),
   getContent: (id) => api.get(`/documents/${id}/content`),
   getLayout: (id) => api.get(`/documents/${id}/layout`),
+  fileUrl: (id) => `${settings.apiBaseUrl}/documents/${id}/file`,
   delete: (id) => api.delete(`/documents/${id}`),
   retryExtract: (id) => api.post(`/documents/${id}/extract/retry`),
   retryIndex: (id, indexName = 'default') => api.post(`/documents/${id}/index/retry`, { index_name: indexName }),

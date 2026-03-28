@@ -1,5 +1,7 @@
 """API routes for document processing - Phase 2: OCR & Parsing with MinIO."""
 
+import mimetypes
+
 from fastapi import APIRouter, UploadFile, File, HTTPException, Response, BackgroundTasks
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -584,6 +586,20 @@ async def get_document_layout(document_id: str):
         page_infos=page_infos,
         layout=content.get("layout", []),
     )
+
+
+@router.get("/documents/{document_id}/file")
+async def get_document_file(document_id: str):
+    """Return the original uploaded file for client-side PDF rendering."""
+    storage = get_minio_storage()
+    filename = _document_filename(storage, document_id)
+    file_bytes = storage.get_file_content(document_id)
+    if file_bytes is None:
+        raise HTTPException(status_code=404, detail="Document source file not found")
+
+    media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    headers = {"Content-Disposition": f'inline; filename="{filename}"'}
+    return Response(content=file_bytes, media_type=media_type, headers=headers)
 
 
 @router.get("/documents/{document_id}/pages/{page_number}/render")

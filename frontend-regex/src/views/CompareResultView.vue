@@ -193,15 +193,19 @@ async function rerunAnalyze() {
             @click="selectedChangeId = change.change_id"
           >
             <div class="change-card__top">
-              <span class="change-card__title">{{ change.title }}</span>
-              <span class="change-card__importance">{{ change.importance }}</span>
+              <span class="change-card__title" :title="change.title">{{ change.title }}</span>
+              <span class="change-card__importance" :class="`change-card__importance--${change.importance || 'medium'}`">
+                {{ change.importance || 'medium' }}
+              </span>
             </div>
             <div class="change-card__meta">
-              <span>{{ change.change_type }}</span>
-              <span>{{ change.change_subtype }}</span>
-              <span v-if="change.left_page || change.right_page">p.{{ change.left_page || '?' }} / p.{{ change.right_page || '?' }}</span>
+              <span class="change-meta-chip">{{ change.change_subtype }}</span>
+              <span v-if="change.left_page || change.right_page" class="change-meta-chip">
+                p.{{ change.left_page || '?' }} / p.{{ change.right_page || '?' }}
+              </span>
+              <span v-if="change.change_type !== 'modified'" class="change-meta-chip">{{ change.change_type }}</span>
             </div>
-            <div class="change-card__summary">{{ change.summary }}</div>
+            <div class="change-card__summary" :title="change.summary">{{ change.summary }}</div>
           </button>
         </div>
         <div v-else class="change-rail__empty">
@@ -232,7 +236,7 @@ async function rerunAnalyze() {
               :page="leftPage"
               :total-pages="leftLayout?.num_pages || leftDocument?.total_pages || leftDocument?.num_pages || 0"
               :highlights="leftHighlights"
-              :viewer-height="'calc(100vh - 360px)'"
+              :viewer-height="'clamp(32rem, 72vh, 56rem)'"
               @update:page="leftPage = $event"
             />
           </div>
@@ -244,7 +248,7 @@ async function rerunAnalyze() {
               :page="rightPage"
               :total-pages="rightLayout?.num_pages || rightDocument?.total_pages || rightDocument?.num_pages || 0"
               :highlights="rightHighlights"
-              :viewer-height="'calc(100vh - 360px)'"
+              :viewer-height="'clamp(32rem, 72vh, 56rem)'"
               @update:page="rightPage = $event"
             />
           </div>
@@ -427,6 +431,7 @@ async function rerunAnalyze() {
   grid-template-columns: 320px minmax(0, 1fr);
   flex: 1;
   min-height: 0;
+  overflow: hidden;
 }
 
 .change-rail {
@@ -461,9 +466,9 @@ async function rerunAnalyze() {
 .change-rail__scroll {
   flex: 1;
   overflow-y: auto;
-  padding: 8px;
+  padding: 0.4rem;
   display: grid;
-  gap: 6px;
+  gap: 0.35rem;
 }
 
 .change-rail__empty {
@@ -486,12 +491,15 @@ async function rerunAnalyze() {
 }
 
 .change-card {
-  padding: 10px 12px;
-  border: 1px solid transparent;
-  border-radius: 10px;
-  background: transparent;
+  display: grid;
+  gap: 0.28rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.7rem;
+  background: #fff;
   text-align: left;
   cursor: pointer;
+  min-width: 0;
 }
 
 .change-card:hover {
@@ -508,34 +516,79 @@ async function rerunAnalyze() {
 .change-card__meta {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-}
-
-.change-card__title {
-  font-size: 0.82rem;
-  font-weight: 700;
-  color: #1e293b;
-}
-
-.change-card__importance {
-  font-size: 0.68rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  color: #dc2626;
-}
-
-.change-card__meta {
-  margin-top: 0.35rem;
-  font-size: 0.7rem;
-  color: #64748b;
+  gap: 0.18rem;
   flex-wrap: wrap;
 }
 
+.change-card__title {
+  flex: 1;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow: hidden;
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: #1e293b;
+  line-height: 1.25;
+}
+
+.change-card__importance {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.08rem 0.34rem;
+  border-radius: 999px;
+  font-size: 0.58rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.change-card__importance--high,
+.change-card__importance--critical {
+  background: rgba(220, 38, 38, 0.12);
+  color: #b91c1c;
+}
+
+.change-card__importance--medium {
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+}
+
+.change-card__importance--low {
+  background: rgba(37, 99, 235, 0.12);
+  color: #1d4ed8;
+}
+
+.change-card__meta {
+  margin-top: 0;
+  row-gap: 0.16rem;
+  column-gap: 0.18rem;
+  min-width: 0;
+}
+
+.change-meta-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.05rem 0.28rem;
+  border-radius: 999px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  font-size: 0.58rem;
+  line-height: 1.1;
+  color: #64748b;
+  white-space: nowrap;
+}
+
 .change-card__summary {
-  margin-top: 0.45rem;
-  font-size: 0.74rem;
-  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow: hidden;
+  font-size: 0.67rem;
+  line-height: 1.3;
   color: #475569;
 }
 
@@ -544,6 +597,7 @@ async function rerunAnalyze() {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 .detail-bar {
@@ -574,10 +628,19 @@ async function rerunAnalyze() {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
   padding: 1rem;
+  align-items: stretch;
+  min-height: 0;
 }
 
 .pdf-pane {
   min-width: 0;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.pdf-pane :deep(.pdf-viewer-card) {
+  width: 100%;
 }
 
 .detail-panel {
