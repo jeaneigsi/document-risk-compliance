@@ -197,6 +197,7 @@ class CompareAnalyzeRequest(BaseModel):
     model: Optional[str] = None
     index_name: str = "default"
     strategy: str = "hybrid"
+    compare_mode: str = "standard"
 
 
 class CompareRunSummaryResponse(BaseModel):
@@ -331,6 +332,7 @@ def _run_compare_in_background(run_id: str) -> None:
                 strategy=str(run.get("strategy") or "hybrid"),
                 index_name=str(run.get("index_name") or "default"),
                 model=run.get("model"),
+                compare_mode=str((run.get("config") or {}).get("compare_mode") or "standard"),
             )
         )
         repo.mark_completed(run_id, result)
@@ -920,6 +922,7 @@ async def compare_analyze(payload: CompareAnalyzeRequest):
         strategy=payload.strategy,
         index_name=payload.index_name,
         model=payload.model,
+        compare_mode=payload.compare_mode,
     )
 
 

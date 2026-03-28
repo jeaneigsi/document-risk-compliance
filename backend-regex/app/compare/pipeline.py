@@ -36,6 +36,7 @@ class CompareDocumentsPipeline:
 
     TRUSTED_STRUCTURED_FIELDS = {"amount", "date", "duration", "reference", "jurisdiction"}
     DIFF_FIRST_SEMANTIC_REPAIR_TOP_K = 2
+    ADAPTIVE_MAX_WINDOWS = 8
 
     def __init__(
         self,
@@ -75,6 +76,7 @@ class CompareDocumentsPipeline:
         strategy: str = "hybrid",
         index_name: str = "default",
         model: str | None = None,
+        compare_mode: str = "standard",
     ) -> dict[str, Any]:
         started = perf_counter()
         requested_claims = [item.strip() for item in (claims or []) if item and item.strip()]
@@ -95,6 +97,7 @@ class CompareDocumentsPipeline:
             index_name=index_name,
             model=model,
             started=started,
+            compare_mode=compare_mode,
         )
 
     async def _analyze_claim_driven(
@@ -255,13 +258,50 @@ class CompareDocumentsPipeline:
         index_name: str,
         model: str | None,
         started: float,
+        compare_mode: str,
     ) -> dict[str, Any]:
-        changes = await self._discover_changes(
-            left=left,
-            right=right,
-            strategy=strategy,
-            index_name=index_name,
-        )
+        refine_count = 0
+        refine_latency_ms = 0.0
+        if compare_mode == "full_lexical":
+            changes = await self._discover_changes_full_lexical(
+                left=left,
+                right=right,
+                strategy=strategy,
+                index_name=index_name,
+            )
+        elif compare_mode == "adaptive":
+            standard_started = perf_counter()
+            standard_changes = await self._discover_changes(
+                left=left,
+                right=right,
+                strategy=strategy,
+                index_name=index_name,
+            )
+            windows = self._plan_refine_windows(
+                standard_changes=standard_changes,
+                left=left,
+                right=right,
+            )
+            refined_started = perf_counter()
+            refined_changes = await self._discover_changes_full_lexical(
+                left=left,
+                right=right,
+                strategy=strategy,
+                index_name=index_name,
+                page_windows=windows,
+                max_changes=48,
+                discovery_mode="lexical_refine",
+            )
+            refine_latency_ms = round((perf_counter() - refined_started) * 1000.0, 3)
+            changes = self._merge_change_sets(standard_changes, refined_changes)
+            refine_count = sum(1 for change in changes if change.get("discovery_mode") == "lexical_refine")
+        else:
+            changes = await self._discover_changes(
+                left=left,
+                right=right,
+                strategy=strategy,
+                index_name=index_name,
+            )
         llm_summary = "Aucun changement significatif détecté."
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         if changes:
@@ -274,6 +314,7 @@ class CompareDocumentsPipeline:
             "right_document_id": right.document_id,
             "strategy": strategy,
             "index_name": index_name,
+            "compare_mode": compare_mode,
             "changes": changes,
             "groups": groups,
             "llm_summary": llm_summary,
@@ -282,6 +323,8 @@ class CompareDocumentsPipeline:
                 "change_count": len(changes),
                 "latency_ms": round((perf_counter() - started) * 1000.0, 3),
                 "llm_escalation_count": 1 if llm_summary else 0,
+                "refined_change_count": refine_count,
+                "refine_latency_ms": refine_latency_ms,
             },
             "usage": usage,
         }
@@ -565,7 +608,11 @@ class CompareDocumentsPipeline:
         return rows
 
     @staticmethod
-    def _rows_for_auto_diff(units: list[EvidenceUnit], limit: int = 16) -> list[dict[str, Any]]:
+    def _rows_for_auto_diff(
+        units: list[EvidenceUnit],
+        limit: int = 16,
+        sentence_limit_per_block: int = 2,
+    ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for index, unit in enumerate(units):
             text = (unit.content or "").strip()
@@ -592,7 +639,10 @@ class CompareDocumentsPipeline:
                     "normalized_text": normalize_text(text),
                 }
             )
-            for sent_index, sentence in enumerate(CompareDocumentsPipeline._split_sentences(text)[:2], start=1):
+            for sent_index, sentence in enumerate(
+                CompareDocumentsPipeline._split_sentences(text)[: max(0, sentence_limit_per_block)],
+                start=1,
+            ):
                 if len(rows) >= limit:
                     break
                 sentence = sentence.strip()
@@ -657,7 +707,11 @@ class CompareDocumentsPipeline:
             if (
                 semantic_budget > 0
                 and strategy in {"semantic", "hybrid"}
-                and (best_pair is None or float(best_pair.get("pair_score", 0.0)) < 2.2)
+                and (
+                    best_pair is None
+                    or float(best_pair.get("pair_score", 0.0)) < 2.2
+                    or self._needs_semantic_repair(best_pair)
+                )
             ):
                 semantic_budget -= 1
                 semantic_candidates = await self._semantic_alignment_candidates(
@@ -711,7 +765,15 @@ class CompareDocumentsPipeline:
             seen_keys.add(key)
             matched_left.add(best_pair["left"]["row"].get("id", ""))
             matched_right.add(best_pair["right"]["row"].get("id", ""))
-            changes.append(self._build_change(change_id=len(changes) + 1, pair=best_pair, diff=diff, strategy=strategy))
+            changes.append(
+                self._build_change(
+                    change_id=len(changes) + 1,
+                    pair=best_pair,
+                    diff=diff,
+                    strategy=strategy,
+                    discovery_mode="standard",
+                )
+            )
 
         for row in left_rows:
             row_id = str(row.get("id") or "")
@@ -723,7 +785,14 @@ class CompareDocumentsPipeline:
                 continue
             if len(changes) >= 18:
                 break
-            changes.append(self._build_unmatched_change(change_id=len(changes) + 1, side="left", row=row))
+            changes.append(
+                self._build_unmatched_change(
+                    change_id=len(changes) + 1,
+                    side="left",
+                    row=row,
+                    discovery_mode="standard",
+                )
+            )
 
         for row in right_rows:
             row_id = str(row.get("id") or "")
@@ -735,7 +804,14 @@ class CompareDocumentsPipeline:
                 continue
             if len(changes) >= 18:
                 break
-            changes.append(self._build_unmatched_change(change_id=len(changes) + 1, side="right", row=row))
+            changes.append(
+                self._build_unmatched_change(
+                    change_id=len(changes) + 1,
+                    side="right",
+                    row=row,
+                    discovery_mode="standard",
+                )
+            )
 
         changes.sort(
             key=lambda item: (
@@ -746,17 +822,177 @@ class CompareDocumentsPipeline:
         )
         return self._merge_related_changes(changes[:18])
 
+    async def _discover_changes_full_lexical(
+        self,
+        left: PreparedDocument,
+        right: PreparedDocument,
+        strategy: str,
+        index_name: str,
+        page_windows: list[tuple[int, int, int, int]] | None = None,
+        max_changes: int = 80,
+        discovery_mode: str = "lexical_full",
+    ) -> list[dict[str, Any]]:
+        left_rows = self._rows_for_auto_diff(left.evidence_units, limit=240, sentence_limit_per_block=4)
+        right_rows = self._rows_for_auto_diff(right.evidence_units, limit=240, sentence_limit_per_block=4)
+        if page_windows:
+            filtered_left = [row for row in left_rows if self._row_in_left_windows(row, page_windows)]
+            filtered_right = [row for row in right_rows if self._row_in_right_windows(row, page_windows)]
+            if filtered_left and filtered_right:
+                left_rows = filtered_left
+                right_rows = filtered_right
+        if not left_rows or not right_rows:
+            return []
+
+        changes: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str, str, str, str]] = set()
+        matched_left: set[str] = set()
+        matched_right: set[str] = set()
+        semantic_budget = 12 if strategy in {"semantic", "hybrid"} else 0
+
+        for index, left_row in enumerate(left_rows):
+            right_candidates = self._candidate_right_rows(left_row, right_rows, index, exhaustive=True)
+            pairs = pair_evidence_rows(
+                claim="full lexical diff",
+                category="general",
+                left_rows=[left_row],
+                right_rows=right_candidates,
+                max_pairs=1,
+                candidate_limit=max(24, len(right_candidates)),
+            )
+            best_pair = pairs[0] if pairs else None
+
+            if (
+                semantic_budget > 0
+                and strategy in {"semantic", "hybrid"}
+                and (
+                    best_pair is None
+                    or float(best_pair.get("pair_score", 0.0)) < 1.6
+                    or self._needs_semantic_repair(best_pair)
+                )
+            ):
+                semantic_budget -= 1
+                semantic_candidates = await self._semantic_alignment_candidates(
+                    document=right,
+                    source_row=left_row,
+                    index_name=index_name,
+                    top_k=self.DIFF_FIRST_SEMANTIC_REPAIR_TOP_K,
+                )
+                if semantic_candidates:
+                    pairs = pair_evidence_rows(
+                        claim="full lexical diff",
+                        category="general",
+                        left_rows=[left_row],
+                        right_rows=self._merge_candidate_rows(right_candidates, semantic_candidates),
+                        max_pairs=1,
+                        candidate_limit=max(32, len(right_candidates) + len(semantic_candidates)),
+                    )
+                    best_pair = pairs[0] if pairs else best_pair
+
+            if not best_pair:
+                continue
+
+            left_text = best_pair["left"]["row"].get("text", "")
+            right_text = best_pair["right"]["row"].get("text", "")
+            if normalize_text(left_text) == normalize_text(right_text):
+                matched_left.add(best_pair["left"]["row"].get("id", ""))
+                matched_right.add(best_pair["right"]["row"].get("id", ""))
+                continue
+
+            structured_diffs = self._build_structured_diffs(
+                category="general",
+                left_facts=best_pair["left"].get("facts", []),
+                right_facts=best_pair["right"].get("facts", []),
+                left_text=left_text,
+                right_text=right_text,
+            )
+            diff = next((row for row in structured_diffs if row.get("diff_kind") == "value_mismatch"), None)
+            if not diff:
+                continue
+            if not self._should_keep_pair_as_change(best_pair, diff, left_text, right_text, exhaustive=True):
+                continue
+
+            key = (
+                str(best_pair["left"]["row"].get("id") or ""),
+                str(best_pair["right"]["row"].get("id") or ""),
+                str(diff.get("field_type") or ""),
+                str(diff.get("left_raw") or ""),
+                str(diff.get("right_raw") or ""),
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            matched_left.add(best_pair["left"]["row"].get("id", ""))
+            matched_right.add(best_pair["right"]["row"].get("id", ""))
+            changes.append(
+                self._build_change(
+                    change_id=len(changes) + 1,
+                    pair=best_pair,
+                    diff=diff,
+                    strategy=strategy,
+                    discovery_mode=discovery_mode,
+                )
+            )
+
+        for row in left_rows:
+            row_id = str(row.get("id") or "")
+            if row_id and row_id in matched_left:
+                continue
+            if str(row.get("row_type") or "block") != "block":
+                continue
+            if not self._is_meaningful_unmatched(row, right_rows, exhaustive=True):
+                continue
+            if len(changes) >= max_changes:
+                break
+            changes.append(
+                self._build_unmatched_change(
+                    change_id=len(changes) + 1,
+                    side="left",
+                    row=row,
+                    discovery_mode=discovery_mode,
+                )
+            )
+
+        for row in right_rows:
+            row_id = str(row.get("id") or "")
+            if row_id and row_id in matched_right:
+                continue
+            if str(row.get("row_type") or "block") != "block":
+                continue
+            if not self._is_meaningful_unmatched(row, left_rows, exhaustive=True):
+                continue
+            if len(changes) >= max_changes:
+                break
+            changes.append(
+                self._build_unmatched_change(
+                    change_id=len(changes) + 1,
+                    side="right",
+                    row=row,
+                    discovery_mode=discovery_mode,
+                )
+            )
+
+        changes.sort(
+            key=lambda item: (
+                int(item.get("left_page") or item.get("right_page") or 0),
+                item.get("title") or "",
+                item.get("change_id") or "",
+            )
+        )
+        return changes[:max_changes]
+
     @staticmethod
     def _should_keep_pair_as_change(
         pair: dict[str, Any],
         diff: dict[str, Any],
         left_text: str,
         right_text: str,
+        exhaustive: bool = False,
     ) -> bool:
         shared_fields = pair.get("shared_field_types") or []
         reason = str(pair.get("pairing_reason") or "")
         left_section = normalize_text(pair.get("left", {}).get("row", {}).get("section_hint") or "")
         right_section = normalize_text(pair.get("right", {}).get("row", {}).get("section_hint") or "")
+        similarity = self._pair_text_similarity(left_text, right_text)
         if shared_fields:
             return True
         if "same_section_hint" in reason:
@@ -765,14 +1001,46 @@ class CompareDocumentsPipeline:
             return True
         if left_section and right_section and left_section != right_section:
             return False
-        similarity = difflib.SequenceMatcher(
+        if (
+            diff.get("change_subtype") in {"numeric_change", "date_change", "reference_change"}
+            and max(len(left_text.strip()), len(right_text.strip())) > 80
+            and similarity < 0.72
+        ):
+            return False
+        if max(len(left_text.strip()), len(right_text.strip())) > 120 and similarity < 0.38:
+            return False
+        return similarity >= (0.82 if exhaustive else 0.9)
+
+    @staticmethod
+    def _pair_text_similarity(left_text: str, right_text: str) -> float:
+        return difflib.SequenceMatcher(
             a=normalize_text(left_text),
             b=normalize_text(right_text),
             autojunk=False,
         ).ratio()
-        return similarity >= 0.9
 
-    def _candidate_right_rows(self, left_row: dict[str, Any], right_rows: list[dict[str, Any]], index: int) -> list[dict[str, Any]]:
+    def _needs_semantic_repair(self, pair: dict[str, Any] | None) -> bool:
+        if not pair:
+            return True
+        left_text = str(pair.get("left", {}).get("row", {}).get("text") or "")
+        right_text = str(pair.get("right", {}).get("row", {}).get("text") or "")
+        if not left_text or not right_text:
+            return True
+        if pair.get("shared_field_types"):
+            return False
+        similarity = self._pair_text_similarity(left_text, right_text)
+        pair_reason = str(pair.get("pairing_reason") or "")
+        if "same_section_hint" in pair_reason and similarity >= 0.45:
+            return False
+        return max(len(left_text.strip()), len(right_text.strip())) > 80 and similarity < 0.42
+
+    def _candidate_right_rows(
+        self,
+        left_row: dict[str, Any],
+        right_rows: list[dict[str, Any]],
+        index: int,
+        exhaustive: bool = False,
+    ) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
         seen: set[str] = set()
 
@@ -811,6 +1079,10 @@ class CompareDocumentsPipeline:
 
         for row in right_rows:
             if str(row.get("row_type") or "block") == left_row_type:
+                add(row)
+
+        if exhaustive:
+            for row in right_rows:
                 add(row)
 
         return candidates
@@ -882,7 +1154,11 @@ class CompareDocumentsPipeline:
         return output
 
     @staticmethod
-    def _is_meaningful_unmatched(row: dict[str, Any], opposite_rows: list[dict[str, Any]]) -> bool:
+    def _is_meaningful_unmatched(
+        row: dict[str, Any],
+        opposite_rows: list[dict[str, Any]],
+        exhaustive: bool = False,
+    ) -> bool:
         text = str(row.get("text") or "").strip()
         normalized = str(row.get("normalized_text") or normalize_text(text))
         section_hint = normalize_text(row.get("section_hint") or "")
@@ -898,7 +1174,7 @@ class CompareDocumentsPipeline:
                 return False
             if section_hint and other_section_hint and section_hint != other_section_hint:
                 continue
-            if difflib.SequenceMatcher(a=normalized, b=other_normalized, autojunk=False).ratio() >= 0.94:
+            if difflib.SequenceMatcher(a=normalized, b=other_normalized, autojunk=False).ratio() >= (0.985 if exhaustive else 0.94):
                 return False
         return True
 
@@ -940,6 +1216,7 @@ class CompareDocumentsPipeline:
         pair: dict[str, Any],
         diff: dict[str, Any],
         strategy: str,
+        discovery_mode: str = "standard",
     ) -> dict[str, Any]:
         left_row = pair["left"]["row"]
         right_row = pair["right"]["row"]
@@ -968,6 +1245,7 @@ class CompareDocumentsPipeline:
             "lexical_diff_ops": lexical_diff_ops,
             "left_evidence": [left_row],
             "right_evidence": [right_row],
+            "discovery_mode": discovery_mode,
             "retrieval": {
                 "strategy": strategy,
                 "candidate_count": 2,
@@ -977,7 +1255,13 @@ class CompareDocumentsPipeline:
             },
         }
 
-    def _build_unmatched_change(self, change_id: int, side: str, row: dict[str, Any]) -> dict[str, Any]:
+    def _build_unmatched_change(
+        self,
+        change_id: int,
+        side: str,
+        row: dict[str, Any],
+        discovery_mode: str = "standard",
+    ) -> dict[str, Any]:
         page = int((row.get("metadata") or {}).get("page_number") or 0)
         title = "Bloc ajouté" if side == "right" else "Bloc supprimé"
         summary = "A text block appears only in one document."
@@ -1001,9 +1285,97 @@ class CompareDocumentsPipeline:
             "lexical_diff_ops": [],
             "left_evidence": [row] if side == "left" else [],
             "right_evidence": [row] if side == "right" else [],
+            "discovery_mode": discovery_mode,
             "retrieval": {"strategy": "local", "candidate_count": 1, "pair_candidate_count": 0, "best_pair_reason": "unmatched_block", "semantic_rerank_count": 0},
         }
         return base
+
+    @staticmethod
+    def _row_in_left_windows(row: dict[str, Any], windows: list[tuple[int, int, int, int]]) -> bool:
+        page = int(row.get("page_number") or (row.get("metadata") or {}).get("page_number") or 0)
+        return any(start <= page <= end for start, end, _, _ in windows)
+
+    @staticmethod
+    def _row_in_right_windows(row: dict[str, Any], windows: list[tuple[int, int, int, int]]) -> bool:
+        page = int(row.get("page_number") or (row.get("metadata") or {}).get("page_number") or 0)
+        return any(start <= page <= end for _, _, start, end in windows)
+
+    def _plan_refine_windows(
+        self,
+        standard_changes: list[dict[str, Any]],
+        left: PreparedDocument,
+        right: PreparedDocument,
+    ) -> list[tuple[int, int, int, int]]:
+        scored: list[tuple[int, tuple[int, int, int, int]]] = []
+        for change in standard_changes:
+            left_page = max(1, int(change.get("left_page") or 1))
+            right_page = max(1, int(change.get("right_page") or 1))
+            priority = 0
+            subtype = str(change.get("change_subtype") or "")
+            if subtype in {"numeric_change", "date_change", "reference_change"}:
+                priority += 4
+            if float(change.get("alignment_confidence") or 0.0) < 0.65:
+                priority += 3
+            if subtype == "text_change":
+                priority += 2
+            if str(change.get("change_type") or "modified") != "modified":
+                priority += 1
+            scored.append((priority, (max(1, left_page - 1), left_page + 1, max(1, right_page - 1), right_page + 1)))
+
+        if not scored:
+            left_pages = sorted({int(unit.page_number or 0) for unit in left.evidence_units if int(unit.page_number or 0) > 0})
+            right_pages = sorted({int(unit.page_number or 0) for unit in right.evidence_units if int(unit.page_number or 0) > 0})
+            for left_page, right_page in zip(left_pages[:4], right_pages[:4], strict=False):
+                scored.append((1, (left_page, left_page, right_page, right_page)))
+
+        windows: list[tuple[int, int, int, int]] = []
+        seen: set[tuple[int, int, int, int]] = set()
+        for _, window in sorted(scored, key=lambda item: item[0], reverse=True):
+            if window in seen:
+                continue
+            seen.add(window)
+            windows.append(window)
+            if len(windows) >= self.ADAPTIVE_MAX_WINDOWS:
+                break
+        return windows
+
+    def _merge_change_sets(
+        self,
+        standard_changes: list[dict[str, Any]],
+        refined_changes: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        order: list[tuple[str, str, str, str]] = []
+
+        def change_key(change: dict[str, Any]) -> tuple[str, str, str, str]:
+            left_id = str((change.get("left_evidence") or [{}])[0].get("id") or "")
+            right_id = str((change.get("right_evidence") or [{}])[0].get("id") or "")
+            return (
+                left_id,
+                right_id,
+                str(change.get("change_type") or ""),
+                str(change.get("change_subtype") or ""),
+            )
+
+        for change in standard_changes + refined_changes:
+            key = change_key(change)
+            if key not in merged:
+                merged[key] = change
+                order.append(key)
+                continue
+            current = merged[key]
+            if current.get("discovery_mode") == "standard" and change.get("discovery_mode") != "standard":
+                merged[key] = change
+
+        rows = [merged[key] for key in order]
+        rows.sort(
+            key=lambda item: (
+                -self._importance_rank(item.get("importance")),
+                int(item.get("left_page") or item.get("right_page") or 0),
+                item.get("title") or "",
+            )
+        )
+        return self._merge_related_changes(rows[:48])
 
     @staticmethod
     def _change_title(subtype: str, field_type: str, section_hint: str | None = None) -> str:
@@ -1061,17 +1433,25 @@ class CompareDocumentsPipeline:
                     "type": change.get("change_type"),
                     "subtype": change.get("change_subtype"),
                     "importance": change.get("importance"),
+                    "field_type": change.get("field_type"),
                     "left_page": change.get("left_page"),
                     "right_page": change.get("right_page"),
+                    "discovery_mode": change.get("discovery_mode"),
                     "left_raw": str(change.get("left_raw") or "")[:120],
                     "right_raw": str(change.get("right_raw") or "")[:120],
                 }
             )
         prompt = (
-            "You are a document comparison analyst.\n"
-            "Summarize the important differences between two documents.\n"
-            "Write 3 short French bullet points max.\n"
-            "No intro. No JSON.\n"
+            "Tu es un analyste de comparaison documentaire.\n"
+            "Ta tâche: résumer les changements détectés entre deux documents et mettre en avant les plus importants.\n"
+            "Règles:\n"
+            "- Réponds en français.\n"
+            "- Retourne 2 à 4 puces courtes maximum.\n"
+            "- Commence par les changements HIGH ou CRITICAL s'il y en a.\n"
+            "- Mentionne explicitement les changements importants: dates, montants, références, ajouts ou suppressions significatifs.\n"
+            "- Si plusieurs micro-changements existent, regroupe-les en une seule puce concise.\n"
+            "- Pas d'introduction. Pas de conclusion. Pas de JSON.\n"
+            "- Chaque puce doit être utile produit, pas technique.\n"
             f"CHANGES:\n{json.dumps(payload, ensure_ascii=False)}"
         )
         try:
@@ -1091,7 +1471,14 @@ class CompareDocumentsPipeline:
     def _deterministic_summary(self, changes: list[dict[str, Any]]) -> str:
         if not changes:
             return "Aucune différence significative détectée."
-        top = changes[:3]
+        ranked = sorted(
+            changes,
+            key=lambda item: (
+                -self._importance_rank(item.get("importance")),
+                item.get("left_page") or item.get("right_page") or 0,
+            ),
+        )
+        top = ranked[:3]
         return "\n".join(f"- {item.get('title')}: {item.get('summary')}" for item in top)
 
     def _change_to_issue(self, change: dict[str, Any], index: int, strategy: str) -> dict[str, Any]:

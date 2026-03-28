@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 from typing import Any
 
 from app.compare.normalization import (
@@ -19,9 +20,11 @@ def pair_evidence_rows(
     left_rows: list[dict[str, Any]],
     right_rows: list[dict[str, Any]],
     max_pairs: int = 3,
+    candidate_limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    enriched_left = [_enrich_row(row, category) for row in left_rows[: max(4, max_pairs)]]
-    enriched_right = [_enrich_row(row, category) for row in right_rows[: max(4, max_pairs)]]
+    limit = candidate_limit if candidate_limit is not None else max(4, max_pairs)
+    enriched_left = [_enrich_row(row, category) for row in left_rows[:limit]]
+    enriched_right = [_enrich_row(row, category) for row in right_rows[:limit]]
     pairs: list[dict[str, Any]] = []
 
     for left in enriched_left:
@@ -96,5 +99,14 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], claim: str, categor
     if left["normalized_text"] == right["normalized_text"] and left["normalized_text"]:
         score += 0.5
         reasons.append("exact_text_match")
+    elif left["normalized_text"] and right["normalized_text"]:
+        similarity = difflib.SequenceMatcher(
+            a=left["normalized_text"],
+            b=right["normalized_text"],
+            autojunk=False,
+        ).ratio()
+        if similarity >= 0.55:
+            score += similarity * 1.5
+            reasons.append(f"text_similarity={similarity:.2f}")
 
     return score, ", ".join(reasons) if reasons else "ranked_by_retrieval_score"

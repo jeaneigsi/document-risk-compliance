@@ -21,6 +21,7 @@ const leftDocumentId = computed(() => run.value?.left_document_id || session.val
 const rightDocumentId = computed(() => run.value?.right_document_id || session.value?.rightDocumentId || '')
 const sessionModel = computed(() => run.value?.model || session.value?.model || 'openrouter/qwen/qwen3.5-9b:exacto')
 const sessionIndexName = computed(() => run.value?.index_name || session.value?.indexName || 'default')
+const compareMode = computed(() => result.value?.compare_mode || run.value?.config?.compare_mode || session.value?.compareMode || 'standard')
 
 const leftLayout = ref(session.value?.leftLayout || null)
 const rightLayout = ref(session.value?.rightLayout || null)
@@ -56,6 +57,19 @@ const summaryItems = computed(() => {
 const summaryLooksLikeList = computed(() =>
   summaryItems.value.length > 1 || /^[-*•]\s/.test(summaryText.value)
 )
+const importantChangeTokens = computed(() => {
+  const tokens = new Set()
+  for (const change of changes.value) {
+    if (!['high', 'critical'].includes(String(change.importance || '').toLowerCase())) continue
+    const title = String(change.title || '').toLowerCase()
+    const subtype = String(change.change_subtype || '').toLowerCase()
+    const fieldType = String(change.field_type || '').toLowerCase()
+    for (const token of [title, subtype, fieldType]) {
+      if (token) tokens.add(token)
+    }
+  }
+  return tokens
+})
 const strategyItems = [
   { title: 'Hybrid', value: 'hybrid' },
   { title: 'Semantic', value: 'semantic' },
@@ -76,6 +90,14 @@ function buildHighlights(evidenceRows, pageNumber, color) {
       fill: color === '#dc2626' ? 'rgba(220, 38, 38, 0.18)' : 'rgba(15, 118, 110, 0.18)',
     }))
     .filter((row) => row.bbox_2d)
+}
+
+function isImportantSummaryItem(item, index) {
+  const normalized = String(item || '').toLowerCase()
+  for (const token of importantChangeTokens.value) {
+    if (token && normalized.includes(token)) return true
+  }
+  return index === 0 && changes.value.some((change) => ['high', 'critical'].includes(String(change.importance || '').toLowerCase()))
 }
 
 function syncSession(partial) {
@@ -134,6 +156,7 @@ async function loadRun({ silent = false } = {}) {
       model: data.model || sessionModel.value,
       indexName: data.index_name,
       strategy: data.strategy,
+      compareMode: data.result?.compare_mode || data.config?.compare_mode || session.value?.compareMode || 'standard',
       result: data.result || null,
       error: data.error || '',
       leftLayout: leftLayout.value,
@@ -169,11 +192,13 @@ async function rerunAnalyze() {
       model: sessionModel.value,
       index_name: sessionIndexName.value,
       strategy: rerunStrategy.value,
+      compare_mode: compareMode.value,
     })
     syncSession({
       runId: data.run_id,
       status: data.status,
       strategy: rerunStrategy.value,
+      compareMode: compareMode.value,
       result: data.result || null,
     })
     await router.replace({ name: 'compare-result', params: { runId: data.run_id } })
@@ -265,6 +290,20 @@ watch(selectedChange, (change) => {
           <v-icon size="13" icon="mdi-lightning-bolt" class="mr-1" />
           {{ run?.strategy || session?.strategy || result?.strategy || 'hybrid' }}
         </span>
+        <span class="pill pill--muted">
+          <v-icon size="13" icon="mdi-tune-variant" class="mr-1" />
+          {{
+            compareMode === 'full_lexical'
+              ? 'full lexical diff'
+              : compareMode === 'adaptive'
+                ? 'adaptive'
+                : 'standard'
+          }}
+        </span>
+        <span v-if="summary.refined_change_count" class="pill pill--muted">
+          <v-icon size="13" icon="mdi-tune" class="mr-1" />
+          {{ summary.refined_change_count }} raffinés
+        </span>
       </div>
       <div class="app-header__right">
         <v-select
@@ -311,7 +350,12 @@ watch(selectedChange, (change) => {
         <div class="summary-strip__main">
           <div class="summary-strip__label">Synthèse</div>
           <div v-if="summaryLooksLikeList" class="summary-strip__list">
-            <div v-for="(item, index) in summaryItems" :key="`${index}-${item}`" class="summary-strip__item">
+            <div
+              v-for="(item, index) in summaryItems"
+              :key="`${index}-${item}`"
+              class="summary-strip__item"
+              :class="{ 'summary-strip__item--important': isImportantSummaryItem(item, index) }"
+            >
               <span class="summary-strip__bullet" />
               <span class="summary-strip__item-text">{{ item }}</span>
             </div>
@@ -613,6 +657,14 @@ watch(selectedChange, (change) => {
   grid-template-columns: 0.55rem minmax(0, 1fr);
   gap: 0.55rem;
   align-items: start;
+  padding: 0.1rem 0;
+}
+
+.summary-strip__item--important {
+  padding: 0.45rem 0.6rem;
+  border-radius: 0.8rem;
+  background: linear-gradient(180deg, rgba(254, 242, 242, 0.9), rgba(255, 255, 255, 0.95));
+  border: 1px solid rgba(248, 113, 113, 0.25);
 }
 
 .summary-strip__bullet {
@@ -623,12 +675,21 @@ watch(selectedChange, (change) => {
   background: #2563eb;
 }
 
+.summary-strip__item--important .summary-strip__bullet {
+  background: #dc2626;
+}
+
 .summary-strip__item-text {
   min-width: 0;
   font-size: 0.88rem;
   line-height: 1.55;
   color: #334155;
   overflow-wrap: anywhere;
+}
+
+.summary-strip__item--important .summary-strip__item-text {
+  color: #7f1d1d;
+  font-weight: 600;
 }
 
 .summary-strip__groups {

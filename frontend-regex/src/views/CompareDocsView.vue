@@ -12,6 +12,7 @@ const rightDocumentId = ref('')
 const selectedModel = ref('openrouter/qwen/qwen3.5-9b:exacto')
 const strategy = ref('hybrid')
 const indexName = ref('default')
+const compareMode = ref('adaptive')
 const loading = ref(false)
 const error = ref('')
 const uploadInput = ref(null)
@@ -81,6 +82,7 @@ async function analyze() {
       model: selectedModel.value,
       index_name: indexName.value,
       strategy: strategy.value,
+      compare_mode: compareMode.value,
     })
     store.setCompareSession({
       runId: data.run_id,
@@ -92,6 +94,7 @@ async function analyze() {
       model: selectedModel.value,
       indexName: indexName.value,
       strategy: strategy.value,
+      compareMode: compareMode.value,
       result: data.result || null,
     })
     await router.push({ name: 'compare-result', params: { runId: data.run_id } })
@@ -204,6 +207,19 @@ async function analyze() {
               variant="outlined"
               density="comfortable"
             />
+            <v-select
+              v-model="compareMode"
+              :items="[
+                { title: 'Adaptive', value: 'adaptive' },
+                { title: 'Compare standard', value: 'standard' },
+                { title: 'Full lexical diff', value: 'full_lexical' },
+              ]"
+              item-title="title"
+              item-value="value"
+              label="Mode de comparaison"
+              variant="outlined"
+              density="comfortable"
+            />
             <v-select v-model="strategy" :items="['hybrid', 'semantic', 'lexical', 'rg']" label="Stratégie" variant="outlined" density="comfortable" />
             <v-select v-model="indexName" :items="['default', 'evidence', 'documents']" label="Index" variant="outlined" density="comfortable" />
           </div>
@@ -214,7 +230,15 @@ async function analyze() {
         <v-card-text class="launch-card__body">
           <div class="launch-copy">
             <strong>Analyse automatique</strong>
-            <span>Le système aligne les blocs, calcule les diffs locaux, puis résume les changements importants.</span>
+            <span>
+              {{
+                compareMode === 'full_lexical'
+                  ? 'Le système remonte une liste beaucoup plus large de différences, y compris les micro-changements.'
+                  : compareMode === 'adaptive'
+                    ? 'Le système produit un résultat rapide puis raffine lexicalement les zones suspectes sans fouiller tout le document.'
+                  : 'Le système aligne les blocs, calcule les diffs locaux, puis résume les changements importants.'
+              }}
+            </span>
           </div>
           <v-btn
             color="primary"

@@ -34,17 +34,17 @@ class LexicalDiffEngine:
         number_re = re.compile(r"\b\d[\d\s.,]*(?:€|eur|usd|\$|mad)?\b", re.IGNORECASE)
         date_re = re.compile(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{2}[/-]\d{2})\b")
         ref_re = re.compile(r"\b[A-Z]{1,6}[-_/]?\d+[A-Z0-9._/-]*\b", re.IGNORECASE)
-        if number_re.search(full_left) and number_re.search(full_right) and full_left.strip() != full_right.strip():
+        if _is_short_structured_value(full_left, full_right) and number_re.search(full_left) and number_re.search(full_right) and full_left.strip() != full_right.strip():
             return "numeric_change"
-        if date_re.search(full_left) and date_re.search(full_right) and full_left.strip() != full_right.strip():
+        if _is_short_structured_value(full_left, full_right) and date_re.search(full_left) and date_re.search(full_right) and full_left.strip() != full_right.strip():
             return "date_change"
-        if ref_re.search(full_left) and ref_re.search(full_right) and full_left.strip() != full_right.strip():
+        if _is_short_structured_value(full_left, full_right) and ref_re.search(full_left) and ref_re.search(full_right) and full_left.strip() != full_right.strip():
             return "reference_change"
-        if number_re.search(combined_delete) and number_re.search(combined_insert):
+        if _has_pattern_change(number_re, combined_delete, combined_insert):
             return "numeric_change"
-        if date_re.search(combined_delete) and date_re.search(combined_insert):
+        if _has_pattern_change(date_re, combined_delete, combined_insert):
             return "date_change"
-        if ref_re.search(combined_delete) and ref_re.search(combined_insert):
+        if _has_pattern_change(ref_re, combined_delete, combined_insert):
             return "reference_change"
         if _contains_clause_signal(text_a) or _contains_clause_signal(text_b):
             return "clause_change"
@@ -88,6 +88,23 @@ def build_diff_engine() -> LexicalDiffEngine:
 def _contains_clause_signal(text: str) -> bool:
     lowered = (text or "").lower()
     return any(token in lowered for token in ("shall", "must", "will", "may not", "doit", "devra", "notice", "termination"))
+
+
+def _is_short_structured_value(left: str, right: str) -> bool:
+    max_len = max(len((left or "").strip()), len((right or "").strip()))
+    return max_len <= 48 and "\n" not in (left or "") and "\n" not in (right or "")
+
+
+def _has_pattern_change(pattern: re.Pattern[str], delete_text: str, insert_text: str) -> bool:
+    left = (delete_text or "").strip()
+    right = (insert_text or "").strip()
+    if not left or not right:
+        return False
+    if max(len(left), len(right)) > 72:
+        return False
+    if max(len(left.split()), len(right.split())) > 10:
+        return False
+    return bool(pattern.search(left) and pattern.search(right))
 
 
 def _tokenize(text: str) -> list[str]:
