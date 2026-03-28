@@ -1,7 +1,7 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { compareApi, documentsApi } from '@/services/api'
+import { compareApi } from '@/services/api'
 import { useAppStore } from '@/stores/app'
 
 const store = useAppStore()
@@ -12,18 +12,10 @@ const rightDocumentId = ref('')
 const selectedModel = ref('openrouter/qwen/qwen3.5-9b:exacto')
 const strategy = ref('hybrid')
 const indexName = ref('default')
-const topK = ref(5)
-const autoDiff = ref(true)
-const claims = ref([])
-const suggestions = ref([])
-const compareResult = ref(null)
 const loading = ref(false)
-const loadingSuggestions = ref(false)
 const error = ref('')
 const uploadInput = ref(null)
 const uploadTarget = ref('left')
-const leftLayout = ref(null)
-const rightLayout = ref(null)
 
 const completedDocs = computed(() => (store.documents || []).filter((doc) => doc.status === 'completed'))
 const documentItems = computed(() =>
@@ -32,49 +24,17 @@ const documentItems = computed(() =>
     value: doc.document_id || doc.id,
   }))
 )
-
 const leftDocument = computed(() =>
   completedDocs.value.find((doc) => (doc.document_id || doc.id) === leftDocumentId.value)
 )
 const rightDocument = computed(() =>
   completedDocs.value.find((doc) => (doc.document_id || doc.id) === rightDocumentId.value)
 )
-
-const summaryChips = computed(() => {
-  const summary = compareResult.value?.summary || {}
-  return [
-    { label: 'Critical / inconsistent', value: summary.inconsistent_count || 0, color: 'error' },
-    { label: 'Insufficient evidence', value: summary.insufficient_evidence_count || 0, color: 'warning' },
-    { label: 'Latency ms', value: summary.latency_ms || 0, color: 'info' },
-    { label: 'Total tokens', value: compareResult.value?.usage?.total_tokens || 0, color: 'primary' },
-  ]
-})
+const compareReady = computed(() => Boolean(leftDocumentId.value && rightDocumentId.value))
 
 onMounted(async () => {
   await store.fetchDocuments()
 })
-
-watch(leftDocumentId, async (value) => {
-  leftLayout.value = value ? await fetchLayout(value) : null
-  suggestions.value = []
-  compareResult.value = null
-})
-
-watch(rightDocumentId, async (value) => {
-  rightLayout.value = value ? await fetchLayout(value) : null
-  suggestions.value = []
-  compareResult.value = null
-})
-
-async function fetchLayout(documentId) {
-  try {
-    const { data } = await documentsApi.getLayout(documentId)
-    return data
-  } catch (e) {
-    console.error('layout load failed', e)
-    return null
-  }
-}
 
 function triggerUpload(target) {
   uploadTarget.value = target
@@ -110,69 +70,26 @@ async function pollUntilCompleted(documentId) {
   throw new Error('Timed out waiting for document processing')
 }
 
-async function loadSuggestions() {
-  if (!leftDocumentId.value || !rightDocumentId.value) return
-  loadingSuggestions.value = true
-  error.value = ''
-  try {
-    const { data } = await compareApi.suggestClaims({
-      left_document_id: leftDocumentId.value,
-      right_document_id: rightDocumentId.value,
-      limit: 8,
-    })
-    suggestions.value = data.suggestions || []
-    if (!claims.value.length) {
-      claims.value = suggestions.value.slice(0, 4).map((item) => item.claim)
-    }
-  } catch (e) {
-    error.value = e.response?.data?.detail || e.message
-  } finally {
-    loadingSuggestions.value = false
-  }
-}
-
-function addSuggestion(claim) {
-  if (!claims.value.includes(claim)) claims.value.push(claim)
-}
-
-function addClaim() {
-  claims.value.push('')
-}
-
-function removeClaim(index) {
-  claims.value.splice(index, 1)
-}
-
 async function analyze() {
-  if (!leftDocumentId.value || !rightDocumentId.value) return
+  if (!compareReady.value) return
   loading.value = true
   error.value = ''
-  compareResult.value = null
   try {
     const { data } = await compareApi.analyze({
       left_document_id: leftDocumentId.value,
       right_document_id: rightDocumentId.value,
-      claims: claims.value.filter((item) => item && item.trim()),
-      auto_diff: autoDiff.value,
       model: selectedModel.value,
       index_name: indexName.value,
       strategy: strategy.value,
-      top_k: topK.value,
     })
-    compareResult.value = data
     store.setCompareSession({
       leftDocument: leftDocument.value,
       rightDocument: rightDocument.value,
-      leftLayout: leftLayout.value,
-      rightLayout: rightLayout.value,
       leftDocumentId: leftDocumentId.value,
       rightDocumentId: rightDocumentId.value,
-      claims: claims.value.filter((item) => item && item.trim()),
-      autoDiff: autoDiff.value,
       model: selectedModel.value,
       indexName: indexName.value,
       strategy: strategy.value,
-      topK: topK.value,
       result: data,
     })
     await router.push({ name: 'compare-result' })
@@ -194,203 +111,263 @@ async function analyze() {
       @change="onUploadSelected"
     />
 
-    <v-row class="mb-6">
-      <v-col cols="12">
-        <h1 class="text-h4 font-weight-bold">
-          <v-icon icon="mdi-file-compare" class="mr-2" />
-          Compare 2 Documents
-        </h1>
-        <p class="text-body-1 text-medium-emphasis">
-          Prépare la comparaison ici. Une fois l’analyse terminée, la zone comparative s’ouvre dans une page dédiée.
+    <section class="head">
+      <div>
+        <h1 class="head__title">Comparer deux documents</h1>
+        <p class="head__subtitle">
+          Ce mode détecte les changements entre deux documents. Pour vérifier un seul document avec des questions, utilise l’onglet <strong>Analyse LLM</strong>.
         </p>
-      </v-col>
-    </v-row>
+      </div>
+    </section>
 
     <v-alert v-if="error" type="error" variant="tonal" class="mb-4">{{ error }}</v-alert>
 
-    <v-row class="mb-4">
-      <v-col cols="12" md="6">
-        <v-card class="selection-card">
-          <v-card-title class="d-flex align-center">
-            <span>Document gauche</span>
-            <v-spacer />
-            <v-btn color="secondary" variant="tonal" prepend-icon="mdi-upload" @click="triggerUpload('left')">
-              Upload live
-            </v-btn>
-          </v-card-title>
-          <v-card-text>
-            <v-select
-              v-model="leftDocumentId"
-              :items="documentItems"
-              label="Choisir un document"
-              variant="outlined"
-            />
-            <v-chip v-if="leftDocument" size="small" color="info" class="mt-2">
-              {{ leftDocument.filename }} · {{ leftDocument.total_pages || leftDocument.num_pages || '?' }} pages
-            </v-chip>
-          </v-card-text>
-        </v-card>
-      </v-col>
-      <v-col cols="12" md="6">
-        <v-card class="selection-card">
-          <v-card-title class="d-flex align-center">
-            <span>Document droit</span>
-            <v-spacer />
-            <v-btn color="secondary" variant="tonal" prepend-icon="mdi-upload" @click="triggerUpload('right')">
-              Upload live
-            </v-btn>
-          </v-card-title>
-          <v-card-text>
-            <v-select
-              v-model="rightDocumentId"
-              :items="documentItems"
-              label="Choisir un document"
-              variant="outlined"
-            />
-            <v-chip v-if="rightDocument" size="small" color="info" class="mt-2">
-              {{ rightDocument.filename }} · {{ rightDocument.total_pages || rightDocument.num_pages || '?' }} pages
-            </v-chip>
-          </v-card-text>
-        </v-card>
-      </v-col>
-    </v-row>
-
-    <v-row>
-      <v-col cols="12" md="5">
-        <v-card class="control-card">
-          <v-card-title class="d-flex align-center">
-            <span>Claims & pilotage</span>
-            <v-spacer />
-            <v-switch v-model="autoDiff" inset color="primary" label="Auto-diff" hide-details />
-          </v-card-title>
-          <v-card-text>
-            <div class="d-flex flex-wrap ga-2 mb-4">
-              <v-btn
-                variant="tonal"
-                prepend-icon="mdi-lightbulb-on-outline"
-                :disabled="!leftDocumentId || !rightDocumentId"
-                :loading="loadingSuggestions"
-                @click="loadSuggestions"
-              >
-                Suggérer des claims
-              </v-btn>
-              <v-btn color="primary" prepend-icon="mdi-robot" :loading="loading" :disabled="!leftDocumentId || !rightDocumentId" @click="analyze">
-                Lancer l'analyse compare
-              </v-btn>
-            </div>
-
-            <v-text-field
-              v-for="(claim, index) in claims"
-              :key="`claim-${index}`"
-              v-model="claims[index]"
-              :label="`Claim ${index + 1}`"
-              variant="outlined"
-              density="comfortable"
-              class="mb-2"
-            >
-              <template #append-inner>
-                <v-btn icon="mdi-close" variant="text" size="small" @click="removeClaim(index)" />
-              </template>
-            </v-text-field>
-
-            <v-btn variant="text" prepend-icon="mdi-plus" @click="addClaim">Ajouter un claim</v-btn>
-
-            <v-divider class="my-4" />
-
-            <v-select v-model="selectedModel" :items="[
-              { title: 'Qwen 3.5 9B (exacto)', value: 'openrouter/qwen/qwen3.5-9b:exacto' },
-              { title: 'Qwen 3.5 Flash', value: 'openrouter/qwen/qwen3.5-flash-02-23:exacto' },
-            ]" item-title="title" item-value="value" label="Modèle" variant="outlined" />
-            <v-select v-model="strategy" :items="['hybrid', 'semantic', 'lexical', 'rg']" label="Stratégie" variant="outlined" />
-            <v-select v-model="indexName" :items="['default', 'evidence', 'documents']" label="Index" variant="outlined" />
-            <v-select v-model="topK" :items="[3, 5, 8]" label="Top K par document" variant="outlined" />
-          </v-card-text>
-        </v-card>
-
-        <v-card class="mt-4">
-          <v-card-title>Suggestions</v-card-title>
-          <v-card-text>
-            <v-alert v-if="!suggestions.length" type="info" variant="tonal">
-              Lance d’abord “Suggérer des claims” pour préremplir des écarts métier.
-            </v-alert>
-            <v-list v-else density="compact">
-              <v-list-item v-for="item in suggestions" :key="item.claim">
-                <v-list-item-title class="text-body-2">{{ item.claim }}</v-list-item-title>
-                <v-list-item-subtitle>{{ item.left_value }} vs {{ item.right_value }}</v-list-item-subtitle>
-                <template #append>
-                  <v-btn size="small" variant="tonal" @click="addSuggestion(item.claim)">Ajouter</v-btn>
-                </template>
-              </v-list-item>
-            </v-list>
-          </v-card-text>
-        </v-card>
-      </v-col>
-
-      <v-col cols="12" md="7">
-        <v-card class="summary-card">
-          <v-card-title>Préparation de la vue comparative</v-card-title>
-          <v-card-text>
-            <v-alert v-if="!compareResult && !loading" type="info" variant="tonal">
-              La page dédiée des résultats s’ouvrira automatiquement une fois l’analyse terminée.
-            </v-alert>
-            <v-progress-linear v-if="loading" indeterminate color="primary" class="mb-4" />
-            <div class="d-flex flex-wrap ga-3 mb-4">
-              <v-chip
-                v-for="chip in summaryChips"
-                :key="chip.label"
-                :color="chip.color"
-                size="large"
-                variant="elevated"
-              >
-                {{ chip.label }}: {{ chip.value }}
-              </v-chip>
-            </div>
-            <div v-if="compareResult" class="issue-grid">
-              <div
-                v-for="issue in compareResult.issues"
-                :key="issue.issue_id"
-                class="issue-tile"
-              >
-                <div class="d-flex align-center justify-space-between mb-2">
-                  <strong>{{ issue.severity }}</strong>
-                  <v-chip :color="issue.verdict === 'inconsistent' ? 'error' : issue.verdict === 'consistent' ? 'success' : 'warning'" size="small">
-                    {{ issue.verdict }}
-                  </v-chip>
+    <div class="layout">
+      <v-card class="surface-card">
+        <v-card-title class="card-title-row">
+          <div>
+            <div class="card-title-text">Sources</div>
+            <div class="card-subtitle-text">Choisis les deux documents à comparer.</div>
+          </div>
+        </v-card-title>
+        <v-card-text class="card-body">
+          <div class="doc-grid">
+            <div class="doc-slot">
+              <div class="doc-slot__head">
+                <div>
+                  <div class="doc-slot__title">Document A</div>
+                  <div class="doc-slot__hint">Source gauche</div>
                 </div>
-                <div class="text-body-2 font-weight-medium">{{ issue.claim }}</div>
-                <div class="text-caption text-medium-emphasis mt-2">{{ issue.summary }}</div>
+                <v-btn color="secondary" variant="tonal" prepend-icon="mdi-upload" @click="triggerUpload('left')">
+                  Upload
+                </v-btn>
+              </div>
+              <v-select
+                v-model="leftDocumentId"
+                :items="documentItems"
+                label="Choisir un document"
+                variant="outlined"
+                density="comfortable"
+              />
+              <div v-if="leftDocument" class="doc-chip">
+                <v-icon size="16" icon="mdi-file-pdf-box" />
+                <span>{{ leftDocument.filename }}</span>
               </div>
             </div>
-          </v-card-text>
-        </v-card>
-      </v-col>
-    </v-row>
+
+            <div class="doc-slot">
+              <div class="doc-slot__head">
+                <div>
+                  <div class="doc-slot__title">Document B</div>
+                  <div class="doc-slot__hint">Source droite</div>
+                </div>
+                <v-btn color="secondary" variant="tonal" prepend-icon="mdi-upload" @click="triggerUpload('right')">
+                  Upload
+                </v-btn>
+              </div>
+              <v-select
+                v-model="rightDocumentId"
+                :items="documentItems"
+                label="Choisir un document"
+                variant="outlined"
+                density="comfortable"
+              />
+              <div v-if="rightDocument" class="doc-chip">
+                <v-icon size="16" icon="mdi-file-pdf-box" />
+                <span>{{ rightDocument.filename }}</span>
+              </div>
+            </div>
+          </div>
+        </v-card-text>
+      </v-card>
+
+      <v-card class="surface-card">
+        <v-card-title class="card-title-row">
+          <div>
+            <div class="card-title-text">Réglages</div>
+            <div class="card-subtitle-text">Le compareur est diff-first. Le sémantique n’aide que l’alignement.</div>
+          </div>
+        </v-card-title>
+        <v-card-text class="card-body">
+          <div class="settings-grid">
+            <v-select
+              v-model="selectedModel"
+              :items="[
+                { title: 'Qwen 3.5 9B (exacto)', value: 'openrouter/qwen/qwen3.5-9b:exacto' },
+                { title: 'Qwen 3.5 Flash', value: 'openrouter/qwen/qwen3.5-flash-02-23:exacto' },
+              ]"
+              item-title="title"
+              item-value="value"
+              label="Modèle de synthèse"
+              variant="outlined"
+              density="comfortable"
+            />
+            <v-select v-model="strategy" :items="['hybrid', 'semantic', 'lexical', 'rg']" label="Stratégie" variant="outlined" density="comfortable" />
+            <v-select v-model="indexName" :items="['default', 'evidence', 'documents']" label="Index" variant="outlined" density="comfortable" />
+          </div>
+        </v-card-text>
+      </v-card>
+
+      <v-card class="surface-card launch-card">
+        <v-card-text class="launch-card__body">
+          <div class="launch-copy">
+            <strong>Analyse automatique</strong>
+            <span>Le système aligne les blocs, calcule les diffs locaux, puis résume les changements importants.</span>
+          </div>
+          <v-btn
+            color="primary"
+            size="large"
+            prepend-icon="mdi-file-compare"
+            :loading="loading"
+            :disabled="!compareReady"
+            @click="analyze"
+          >
+            Lancer la comparaison
+          </v-btn>
+        </v-card-text>
+      </v-card>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .compare-page {
   min-height: 100%;
+  padding-bottom: 2rem;
 }
 
-.selection-card,
-.control-card,
-.summary-card {
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  box-shadow: 0 18px 50px rgba(15, 23, 42, 0.08);
+.head {
+  margin-bottom: 1rem;
 }
 
-.issue-grid {
+.head__title {
+  font-size: clamp(1.25rem, 1.5vw, 1.6rem);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: #0f172a;
+}
+
+.head__subtitle {
+  margin-top: 0.5rem;
+  max-width: 68ch;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: #475569;
+}
+
+.layout {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 12px;
+  gap: 1rem;
 }
 
-.issue-tile {
-  text-align: left;
-  padding: 16px;
-  border-radius: 16px;
-  border: 1px solid rgba(148, 163, 184, 0.24);
-  background: linear-gradient(180deg, #fff, #f8fafc);
+.surface-card {
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 1rem;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.06);
+}
+
+.card-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.card-title-text {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.card-subtitle-text {
+  margin-top: 0.25rem;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: #64748b;
+}
+
+.card-body {
+  display: grid;
+  gap: 1rem;
+}
+
+.doc-grid,
+.settings-grid {
+  display: grid;
+  gap: 0.875rem;
+}
+
+.doc-slot {
+  padding: 1rem;
+  border-radius: 0.9rem;
+  background: #f8fafc;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.doc-slot__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.875rem;
+}
+
+.doc-slot__title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.doc-slot__hint {
+  margin-top: 0.2rem;
+  font-size: 0.78rem;
+  color: #64748b;
+}
+
+.doc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding: 0.45rem 0.75rem;
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.08);
+  color: rgb(30, 64, 175);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.launch-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.launch-copy {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.86rem;
+  color: #475569;
+}
+
+@media (min-width: 768px) {
+  .doc-grid,
+  .settings-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .launch-card__body {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
+}
+
+@media (max-width: 767px) {
+  .card-title-row,
+  .doc-slot__head {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 </style>

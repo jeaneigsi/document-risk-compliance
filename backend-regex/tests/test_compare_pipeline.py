@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.compare.diff_engine import build_diff_engine
 from app.compare.pipeline import CompareDocumentsPipeline, PreparedDocument
 from app.search.evidence import EvidenceUnit
 
@@ -99,10 +100,8 @@ async def test_compare_pipeline_uses_structured_decision_without_llm():
         left=_prepared("left-doc", "The limitation of liability is capped at 50,000 EUR."),
         right=_prepared("right-doc", "The limitation of liability is capped at 500,000 EUR."),
         claims=["The liability clause is materially identical in both documents."],
-        auto_diff=False,
         strategy="hybrid",
         index_name="default",
-        top_k=3,
         model=None,
     )
 
@@ -110,6 +109,9 @@ async def test_compare_pipeline_uses_structured_decision_without_llm():
     assert issue["verdict"] == "inconsistent"
     assert issue["decision_source"] == "structured_compare"
     assert issue["structured_diffs"][0]["diff_kind"] == "value_mismatch"
+    assert issue["structured_diffs"][0]["lexical_diff_ops"]
+    assert issue["structured_diffs"][0]["change_subtype"] == "numeric_change"
+    assert issue["alignment_pairs"][0]["alignment_source"] == "hybrid"
     assert issue["retrieval"]["pair_candidate_count"] >= 1
     assert result["usage"]["total_tokens"] == 0
 
@@ -125,15 +127,66 @@ async def test_compare_pipeline_escalates_to_llm_for_ambiguous_pair():
         left=_prepared("left-ambiguous", "Termination requires prompt notice and mutual discussion."),
         right=_prepared("right-ambiguous", "Termination requires commercially reasonable notice and review."),
         claims=["The termination clause is materially identical in both documents."],
-        auto_diff=False,
         strategy="hybrid",
         index_name="default",
-        top_k=3,
         model=None,
     )
 
     issue = result["issues"][0]
     assert issue["decision_source"] == "llm"
     assert issue["verdict"] == "inconsistent"
+    assert issue["alignment_pairs"][0]["pairing_reason"]
     assert issue["usage"]["total_tokens"] == 120
     assert result["summary"]["llm_escalation_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_compare_pipeline_diff_first_returns_changes_without_claims():
+    pipeline = CompareDocumentsPipeline(
+        search_pipeline=DummySearchPipeline(),
+        llm_client=GuardLLMClient(),
+    )
+
+    result = await pipeline.analyze(
+        left=_prepared("left-doc", "The limitation of liability is capped at 50,000 EUR."),
+        right=_prepared("right-doc", "The limitation of liability is capped at 500,000 EUR."),
+        strategy="lexical",
+        index_name="default",
+        model=None,
+    )
+
+    assert result["mode"] == "diff-first"
+    assert result["changes"]
+    assert result["changes"][0]["change_subtype"] == "numeric_change"
+    assert result["summary"]["change_count"] >= 1
+
+
+def test_diff_engine_refines_single_letter_change_inside_word():
+    engine = build_diff_engine()
+
+    ops = engine.diff_words("Supplier", "Suppller")
+
+    assert any(item["op"] == "equal" and "Suppl" in item["text"] for item in ops)
+    assert any(item["op"] == "delete" and item["text"] == "i" for item in ops)
+    assert any(item["op"] == "insert" and item["text"] == "l" for item in ops)
+
+
+@pytest.mark.asyncio
+async def test_compare_pipeline_returns_empty_change_list_for_identical_documents():
+    pipeline = CompareDocumentsPipeline(
+        search_pipeline=DummySearchPipeline(),
+        llm_client=GuardLLMClient(),
+    )
+
+    result = await pipeline.analyze(
+        left=_prepared("same-left", "Supplier name: Contoso Manufacturing"),
+        right=_prepared("same-right", "Supplier name: Contoso Manufacturing"),
+        strategy="lexical",
+        index_name="default",
+        model=None,
+    )
+
+    assert result["mode"] == "diff-first"
+    assert result["changes"] == []
+    assert result["summary"]["has_changes"] is False
+    assert "Aucun changement" in result["llm_summary"]

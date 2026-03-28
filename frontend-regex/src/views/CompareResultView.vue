@@ -1,8 +1,8 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import PdfPageViewer from '@/components/PdfPageViewer.vue'
-import { compareApi } from '@/services/api'
+import { compareApi, documentsApi } from '@/services/api'
 import { useAppStore } from '@/stores/app'
 
 const store = useAppStore()
@@ -12,32 +12,27 @@ const session = computed(() => store.compareSession)
 const result = computed(() => session.value?.result || null)
 const leftDocument = computed(() => session.value?.leftDocument || null)
 const rightDocument = computed(() => session.value?.rightDocument || null)
-const leftLayout = computed(() => session.value?.leftLayout || null)
-const rightLayout = computed(() => session.value?.rightLayout || null)
 const leftDocumentId = computed(() => session.value?.leftDocumentId || '')
 const rightDocumentId = computed(() => session.value?.rightDocumentId || '')
-const sessionClaims = computed(() => session.value?.claims || [])
-const sessionAutoDiff = computed(() => session.value?.autoDiff ?? true)
 const sessionModel = computed(() => session.value?.model || 'openrouter/qwen/qwen3.5-9b:exacto')
 const sessionIndexName = computed(() => session.value?.indexName || 'default')
-const sessionTopK = computed(() => session.value?.topK || 5)
 
-const selectedIssueId = ref('')
+const leftLayout = ref(session.value?.leftLayout || null)
+const rightLayout = ref(session.value?.rightLayout || null)
+const selectedChangeId = ref('')
 const leftPage = ref(1)
 const rightPage = ref(1)
 const rerunLoading = ref(false)
 const rerunError = ref('')
 const rerunStrategy = ref('')
-const panelOpen = ref(true)
-const panelTab = ref('decision')
+const debugOpen = ref(false)
 
-const selectedIssue = computed(() =>
-  (result.value?.issues || []).find((issue) => issue.issue_id === selectedIssueId.value) || null
+const changes = computed(() => result.value?.changes || [])
+const hasChanges = computed(() => changes.value.length > 0)
+const selectedChange = computed(() =>
+  changes.value.find((change) => change.change_id === selectedChangeId.value) || null
 )
-const leftEvidence = computed(() => selectedIssue.value?.left_evidence || [])
-const rightEvidence = computed(() => selectedIssue.value?.right_evidence || [])
-const structuredDiffs = computed(() => selectedIssue.value?.structured_diffs || [])
-const retrievalMeta = computed(() => selectedIssue.value?.retrieval || {})
+const summary = computed(() => result.value?.summary || {})
 const strategyItems = [
   { title: 'Hybrid', value: 'hybrid' },
   { title: 'Semantic', value: 'semantic' },
@@ -45,42 +40,8 @@ const strategyItems = [
   { title: 'RG', value: 'rg' },
 ]
 
-const stats = computed(() => {
-  const s = result.value?.summary || {}
-  const issues = result.value?.issues || []
-  return {
-    inconsistent: s.inconsistent_count || 0,
-    insufficient: s.insufficient_evidence_count || 0,
-    consistent: issues.filter((i) => i.verdict === 'consistent').length,
-    latency: s.latency_ms || 0,
-    tokens: result.value?.usage?.total_tokens || 0,
-    total: issues.length,
-  }
-})
-
-const severityColor = { critical: '#ef4444', high: '#f97316', medium: '#eab308', low: '#3b82f6' }
-const verdictConf = {
-  inconsistent: { bg: '#fef2f2', fg: '#dc2626', ring: '#fca5a5' },
-  consistent: { bg: '#f0fdf4', fg: '#16a34a', ring: '#86efac' },
-  insufficient_evidence: { bg: '#fffbeb', fg: '#d97706', ring: '#fcd34d' },
-}
-
-const leftHighlights = computed(() => buildHighlights(selectedIssue.value?.left_evidence || [], leftPage.value, '#dc2626'))
-const rightHighlights = computed(() => buildHighlights(selectedIssue.value?.right_evidence || [], rightPage.value, '#0f766e'))
-
-watch(result, (value) => {
-  if (!value?.issues?.length) return
-  selectedIssueId.value = value.issues[0].issue_id
-  rerunStrategy.value = session.value?.strategy || value?.strategy || 'hybrid'
-}, { immediate: true })
-
-watch(selectedIssue, (issue) => {
-  if (!issue) return
-  const leftHit = issue.left_evidence?.[0]
-  const rightHit = issue.right_evidence?.[0]
-  if (leftHit?.metadata?.page_number) leftPage.value = Number(leftHit.metadata.page_number)
-  if (rightHit?.metadata?.page_number) rightPage.value = Number(rightHit.metadata.page_number)
-})
+const leftHighlights = computed(() => buildHighlights(selectedChange.value?.left_evidence || [], leftPage.value, '#dc2626'))
+const rightHighlights = computed(() => buildHighlights(selectedChange.value?.right_evidence || [], rightPage.value, '#0f766e'))
 
 function buildHighlights(evidenceRows, pageNumber, color) {
   return evidenceRows
@@ -94,7 +55,49 @@ function buildHighlights(evidenceRows, pageNumber, color) {
     .filter((row) => row.bbox_2d)
 }
 
-function backToSetup() { router.push({ name: 'compare' }) }
+async function ensureLayout(documentId, side) {
+  if (!documentId) return
+  const current = side === 'left' ? leftLayout.value : rightLayout.value
+  if (current?.num_pages) return
+  try {
+    const { data } = await documentsApi.getLayout(documentId)
+    if (side === 'left') leftLayout.value = data
+    else rightLayout.value = data
+    if (session.value) {
+      store.setCompareSession({
+        ...session.value,
+        leftLayout: side === 'left' ? data : leftLayout.value,
+        rightLayout: side === 'right' ? data : rightLayout.value,
+      })
+    }
+  } catch (e) {
+    console.error('compare result layout load failed', e)
+  }
+}
+
+onMounted(() => {
+  ensureLayout(leftDocumentId.value, 'left')
+  ensureLayout(rightDocumentId.value, 'right')
+})
+
+watch(result, (value) => {
+  if (!value?.changes?.length) {
+    selectedChangeId.value = ''
+    return
+  }
+  selectedChangeId.value = value.changes[0].change_id
+  rerunStrategy.value = session.value?.strategy || value?.strategy || 'hybrid'
+}, { immediate: true })
+
+watch(selectedChange, (change) => {
+  if (!change) return
+  leftPage.value = Number(change.left_page || 1)
+  rightPage.value = Number(change.right_page || 1)
+})
+
+function backToSetup() {
+  router.push({ name: 'compare' })
+}
 
 async function rerunAnalyze() {
   if (!leftDocumentId.value || !rightDocumentId.value) return
@@ -104,12 +107,9 @@ async function rerunAnalyze() {
     const { data } = await compareApi.analyze({
       left_document_id: leftDocumentId.value,
       right_document_id: rightDocumentId.value,
-      claims: sessionClaims.value,
-      auto_diff: sessionAutoDiff.value,
       model: sessionModel.value,
       index_name: sessionIndexName.value,
       strategy: rerunStrategy.value,
-      top_k: sessionTopK.value,
     })
     store.setCompareSession({ ...session.value, strategy: rerunStrategy.value, result: data })
   } catch (e) {
@@ -121,49 +121,26 @@ async function rerunAnalyze() {
 </script>
 
 <template>
-  <!-- EMPTY STATE -->
   <div v-if="!result" class="empty-root">
     <div class="empty-card">
       <v-icon size="56" color="primary" icon="mdi-file-compare" />
-      <h2 class="mt-4 text-h6 font-weight-bold">No active comparison</h2>
-      <p class="text-body-2 text-medium-emphasis mt-1 mb-5">Start by selecting two documents on the setup page.</p>
-      <v-btn color="primary" variant="flat" prepend-icon="mdi-arrow-left" @click="backToSetup">Back to setup</v-btn>
+      <h2 class="mt-4 text-h6 font-weight-bold">Aucune comparaison active</h2>
+      <p class="text-body-2 text-medium-emphasis mt-1 mb-5">Sélectionne deux documents sur la page de préparation.</p>
+      <v-btn color="primary" variant="flat" prepend-icon="mdi-arrow-left" @click="backToSetup">Retour</v-btn>
     </div>
   </div>
 
-  <!-- FULL-HEIGHT APP LAYOUT -->
   <div v-else class="app-root">
-    <!-- ═══ HEADER ═══ -->
     <header class="app-header">
       <div class="app-header__left">
         <v-btn icon="mdi-arrow-left" variant="text" density="compact" @click="backToSetup" />
-        <v-icon icon="mdi-file-compare" size="20" class="ml-1" />
-        <span class="app-header__title">Comparison</span>
+        <span class="app-header__title">Changements détectés</span>
       </div>
-
       <div class="app-header__stats">
-        <span class="pill" :class="'pill--' + (stats.inconsistent ? 'danger' : 'muted')">
-          <v-icon size="13" icon="mdi-alert-circle" class="mr-1" />
-          {{ stats.inconsistent }} inconsistent
-        </span>
-        <span class="pill pill--warn" v-if="stats.insufficient">
-          <v-icon size="13" icon="mdi-help-circle-outline" class="mr-1" />
-          {{ stats.insufficient }} low evidence
-        </span>
-        <span class="pill pill--ok" v-if="stats.consistent">
-          <v-icon size="13" icon="mdi-check-circle-outline" class="mr-1" />
-          {{ stats.consistent }} consistent
-        </span>
-        <span class="pill pill--muted">
-          <v-icon size="13" icon="mdi-timer-outline" class="mr-1" />
-          {{ stats.latency }} ms
-        </span>
-        <span class="pill pill--muted">
-          <v-icon size="13" icon="mdi-counter" class="mr-1" />
-          {{ stats.tokens }} tokens
-        </span>
+        <span class="pill" :class="hasChanges ? 'pill--danger' : 'pill--success'">{{ summary.change_count || 0 }} changements</span>
+        <span class="pill pill--muted">{{ summary.latency_ms || 0 }} ms</span>
+        <span class="pill pill--muted">{{ result.usage?.total_tokens || 0 }} tokens</span>
       </div>
-
       <div class="app-header__right">
         <v-select
           v-model="rerunStrategy"
@@ -181,7 +158,7 @@ async function rerunAnalyze() {
           :loading="rerunLoading"
           @click="rerunAnalyze"
         >
-          Rerun
+          Relancer
         </v-btn>
       </div>
     </header>
@@ -190,65 +167,62 @@ async function rerunAnalyze() {
       {{ rerunError }}
     </v-alert>
 
-    <!-- ═══ MAIN WORKSPACE ═══ -->
+    <div class="summary-strip">
+      <div class="summary-strip__main">
+        <div class="summary-strip__label">Synthèse</div>
+        <div class="summary-strip__text">{{ result.llm_summary || 'Aucune synthèse disponible.' }}</div>
+      </div>
+      <div v-if="result.groups?.length" class="summary-strip__groups">
+        <span v-for="group in result.groups" :key="group.key" class="group-chip">{{ group.key }} · {{ group.count }}</span>
+      </div>
+    </div>
+
     <div class="workspace">
-      <!-- ISSUE RAIL -->
-      <nav class="issue-rail">
-        <div class="issue-rail__head">
-          <span>Issues</span>
-          <span class="issue-rail__count">{{ stats.total }}</span>
+      <aside class="change-rail">
+        <div class="change-rail__head">
+          <span>Changements</span>
+          <span class="change-rail__count">{{ changes.length }}</span>
         </div>
-        <div class="issue-rail__scroll">
+        <div v-if="hasChanges" class="change-rail__scroll">
           <button
-            v-for="issue in result.issues"
-            :key="issue.issue_id"
+            v-for="change in changes"
+            :key="change.change_id"
             type="button"
-            class="issue-card"
-            :class="{ 'issue-card--active': selectedIssueId === issue.issue_id }"
-            @click="selectedIssueId = issue.issue_id"
+            class="change-card"
+            :class="{ 'change-card--active': selectedChangeId === change.change_id }"
+            @click="selectedChangeId = change.change_id"
           >
-            <div class="issue-card__dot" :style="{ background: severityColor[issue.severity] || '#64748b' }" />
-            <div class="issue-card__body">
-              <div class="issue-card__row">
-                <span class="issue-card__claim">{{ issue.claim }}</span>
-                <span
-                  class="issue-card__badge"
-                  :style="{
-                    background: (verdictConf[issue.verdict] || verdictConf.insufficient_evidence).bg,
-                    color: (verdictConf[issue.verdict] || verdictConf.insufficient_evidence).fg,
-                  }"
-                >{{ issue.verdict }}</span>
-              </div>
-              <span class="issue-card__summary">{{ issue.summary }}</span>
+            <div class="change-card__top">
+              <span class="change-card__title">{{ change.title }}</span>
+              <span class="change-card__importance">{{ change.importance }}</span>
             </div>
+            <div class="change-card__meta">
+              <span>{{ change.change_type }}</span>
+              <span>{{ change.change_subtype }}</span>
+              <span v-if="change.left_page || change.right_page">p.{{ change.left_page || '?' }} / p.{{ change.right_page || '?' }}</span>
+            </div>
+            <div class="change-card__summary">{{ change.summary }}</div>
           </button>
         </div>
-      </nav>
-
-      <!-- CENTER: PDF AREA -->
-      <div class="pdf-area">
-        <!-- VERDICT BAR -->
-        <div class="verdict-bar" v-if="selectedIssue">
-          <div class="verdict-bar__indicator" :style="{ background: severityColor[selectedIssue.severity] || '#64748b' }" />
-          <div class="verdict-bar__content">
-            <span
-              class="verdict-bar__tag"
-              :style="{
-                background: (verdictConf[selectedIssue.verdict] || verdictConf.insufficient_evidence).bg,
-                color: (verdictConf[selectedIssue.verdict] || verdictConf.insufficient_evidence).fg,
-                border: '1px solid ' + (verdictConf[selectedIssue.verdict] || verdictConf.insufficient_evidence).ring,
-              }"
-            >{{ selectedIssue.verdict }}</span>
-            <span class="verdict-bar__claim">{{ selectedIssue.claim }}</span>
-            <span class="verdict-bar__sep">|</span>
-            <span class="verdict-bar__text">{{ selectedIssue.summary }}</span>
+        <div v-else class="change-rail__empty">
+          <v-icon size="22" icon="mdi-check-circle-outline" color="success" />
+          <div class="change-rail__empty-title">Aucun changement significatif</div>
+          <div class="change-rail__empty-copy">
+            Les blocs alignés ne montrent pas de différence exploitable entre les deux documents.
           </div>
-          <button class="verdict-bar__toggle" @click="panelOpen = !panelOpen">
-            <v-icon size="18" :icon="panelOpen ? 'mdi-chevron-down' : 'mdi-chevron-up'" />
-          </button>
+        </div>
+      </aside>
+
+      <div class="pdf-area">
+        <div class="detail-bar" v-if="selectedChange">
+          <div class="detail-bar__title">{{ selectedChange.title }}</div>
+          <div class="detail-bar__summary">{{ selectedChange.summary }}</div>
+        </div>
+        <div v-else class="detail-bar detail-bar--empty">
+          <div class="detail-bar__title">Documents alignés</div>
+          <div class="detail-bar__summary">Aucun changement significatif détecté. Utilise “Relancer” avec une autre stratégie si tu veux tester un autre alignement.</div>
         </div>
 
-        <!-- PDFs -->
         <div class="pdf-split">
           <div class="pdf-pane">
             <PdfPageViewer
@@ -258,11 +232,10 @@ async function rerunAnalyze() {
               :page="leftPage"
               :total-pages="leftLayout?.num_pages || leftDocument?.total_pages || leftDocument?.num_pages || 0"
               :highlights="leftHighlights"
-              :viewer-height="'calc(100vh - ' + (panelOpen ? '380' : '180') + 'px)'"
+              :viewer-height="'calc(100vh - 360px)'"
               @update:page="leftPage = $event"
             />
           </div>
-          <div class="pdf-divider" />
           <div class="pdf-pane">
             <PdfPageViewer
               title="Document B"
@@ -271,162 +244,62 @@ async function rerunAnalyze() {
               :page="rightPage"
               :total-pages="rightLayout?.num_pages || rightDocument?.total_pages || rightDocument?.num_pages || 0"
               :highlights="rightHighlights"
-              :viewer-height="'calc(100vh - ' + (panelOpen ? '380' : '180') + 'px)'"
+              :viewer-height="'calc(100vh - 360px)'"
               @update:page="rightPage = $event"
             />
           </div>
         </div>
 
-        <!-- BOTTOM PANEL -->
-        <transition name="slide-panel">
-          <div v-if="panelOpen" class="bottom-panel">
-            <div class="bottom-panel__tabs">
-              <button
-                v-for="t in [
-                  { key: 'decision', icon: 'mdi-gavel', label: 'Decision' },
-                  { key: 'diffs', icon: 'mdi-swap-horizontal', label: 'Diffs' },
-                  { key: 'evidence', icon: 'mdi-file-search-outline', label: 'Evidence' },
-                  { key: 'meta', icon: 'mdi-cog-outline', label: 'Retrieval' },
-                ]"
-                :key="t.key"
-                class="bp-tab"
-                :class="{ 'bp-tab--active': panelTab === t.key }"
-                @click="panelTab = t.key"
-              >
-                <v-icon size="14" :icon="t.icon" />
-                {{ t.label }}
-              </button>
+        <div class="detail-panel" v-if="selectedChange">
+          <div class="detail-grid">
+            <div class="detail-card">
+              <div class="detail-card__label">Avant</div>
+              <div class="detail-card__text">{{ selectedChange.left_raw || '—' }}</div>
             </div>
-
-            <div class="bottom-panel__body">
-              <!-- DECISION TAB -->
-              <div v-if="panelTab === 'decision'" class="bp-grid">
-                <div class="bp-field">
-                  <span class="bp-label">Verdict</span>
-                  <span
-                    class="bp-value bp-value--tag"
-                    :style="{
-                      background: (verdictConf[selectedIssue?.verdict] || verdictConf.insufficient_evidence).bg,
-                      color: (verdictConf[selectedIssue?.verdict] || verdictConf.insufficient_evidence).fg,
-                    }"
-                  >{{ selectedIssue?.verdict || 'n/a' }}</span>
-                </div>
-                <div class="bp-field">
-                  <span class="bp-label">Severity</span>
-                  <span class="bp-value" :style="{ color: severityColor[selectedIssue?.severity] || '#334155' }">
-                    {{ selectedIssue?.severity || 'n/a' }}
-                  </span>
-                </div>
-                <div class="bp-field">
-                  <span class="bp-label">Confidence</span>
-                  <span class="bp-value">{{ selectedIssue?.confidence ?? 'n/a' }}</span>
-                </div>
-                <div class="bp-field">
-                  <span class="bp-label">Evidence quality</span>
-                  <span class="bp-value">{{ selectedIssue?.evidence_quality || 'unknown' }}</span>
-                </div>
-                <div class="bp-field">
-                  <span class="bp-label">Source</span>
-                  <span class="bp-value">{{ selectedIssue?.decision_source || 'unknown' }}</span>
-                </div>
-                <div class="bp-field">
-                  <span class="bp-label">Category</span>
-                  <span class="bp-value">{{ selectedIssue?.category || 'general' }}</span>
-                </div>
-                <div class="bp-field bp-field--full">
-                  <span class="bp-label">Rationale</span>
-                  <span class="bp-value bp-value--prose">{{ selectedIssue?.rationale || 'No rationale available.' }}</span>
-                </div>
-              </div>
-
-              <!-- DIFFS TAB -->
-              <div v-if="panelTab === 'diffs'" class="bp-diffs">
-                <div v-if="!structuredDiffs.length" class="bp-empty">No structured diffs for this issue.</div>
-                <div v-for="(diff, i) in structuredDiffs" :key="i" class="bp-diff-card">
-                  <div class="bp-diff-card__head">
-                    <span>{{ diff.field_type }}</span>
-                    <span class="bp-diff-card__kind" :class="{ 'bp-diff-card__kind--bad': diff.diff_kind === 'value_mismatch' }">
-                      {{ diff.diff_kind }}
-                    </span>
-                  </div>
-                  <div class="bp-diff-card__row">
-                    <span class="bp-diff-card__side bp-diff-card__side--a">A</span>
-                    <span>{{ diff.left_raw || 'n/a' }}</span>
-                  </div>
-                  <div class="bp-diff-card__row">
-                    <span class="bp-diff-card__side bp-diff-card__side--b">B</span>
-                    <span>{{ diff.right_raw || 'n/a' }}</span>
-                  </div>
-                </div>
-              </div>
-
-              <!-- EVIDENCE TAB -->
-              <div v-if="panelTab === 'evidence'" class="bp-evidence">
-                <div class="bp-evidence__col">
-                  <div class="bp-evidence__head">
-                    <span>Evidence A</span>
-                    <span class="bp-evidence__cnt bp-evidence__cnt--a">{{ leftEvidence.length }}</span>
-                  </div>
-                  <div v-if="!leftEvidence.length" class="bp-empty">No left evidence.</div>
-                  <div v-for="item in leftEvidence" :key="item.id" class="bp-ev">
-                    <div class="bp-ev__meta">
-                      <span>{{ item.metadata?.page_number ? `p.${item.metadata.page_number}` : 'no page' }}</span>
-                      <span v-if="item.score !== undefined">{{ Number(item.score).toFixed(3) }}</span>
-                    </div>
-                    <div v-if="item.section_hint" class="bp-ev__section">{{ item.section_hint }}</div>
-                    <div class="bp-ev__text">{{ item.text || 'Unavailable' }}</div>
-                  </div>
-                </div>
-                <div class="bp-evidence__col">
-                  <div class="bp-evidence__head">
-                    <span>Evidence B</span>
-                    <span class="bp-evidence__cnt bp-evidence__cnt--b">{{ rightEvidence.length }}</span>
-                  </div>
-                  <div v-if="!rightEvidence.length" class="bp-empty">No right evidence.</div>
-                  <div v-for="item in rightEvidence" :key="item.id" class="bp-ev">
-                    <div class="bp-ev__meta">
-                      <span>{{ item.metadata?.page_number ? `p.${item.metadata.page_number}` : 'no page' }}</span>
-                      <span v-if="item.score !== undefined">{{ Number(item.score).toFixed(3) }}</span>
-                    </div>
-                    <div v-if="item.section_hint" class="bp-ev__section">{{ item.section_hint }}</div>
-                    <div class="bp-ev__text">{{ item.text || 'Unavailable' }}</div>
-                  </div>
-                </div>
-              </div>
-
-              <!-- META TAB -->
-              <div v-if="panelTab === 'meta'" class="bp-grid">
-                <div class="bp-field"><span class="bp-label">Strategy</span><span class="bp-value">{{ retrievalMeta.strategy || result.strategy || 'n/a' }}</span></div>
-                <div class="bp-field"><span class="bp-label">Candidates</span><span class="bp-value">{{ retrievalMeta.candidate_count ?? 0 }}</span></div>
-                <div class="bp-field"><span class="bp-label">Pairs</span><span class="bp-value">{{ retrievalMeta.pair_candidate_count ?? 0 }}</span></div>
-                <div class="bp-field"><span class="bp-label">Evidence kept</span><span class="bp-value">{{ retrievalMeta.evidence_kept_count ?? 0 }}</span></div>
-                <div class="bp-field"><span class="bp-label">Latency</span><span class="bp-value">{{ retrievalMeta.latency_ms ?? 0 }} ms</span></div>
-                <div class="bp-field"><span class="bp-label">Semantic error</span><span class="bp-value">{{ retrievalMeta.semantic_error || 'none' }}</span></div>
-                <div class="bp-field bp-field--full" v-if="retrievalMeta.best_pair_reason">
-                  <span class="bp-label">Pairing reason</span>
-                  <span class="bp-value bp-value--prose">{{ retrievalMeta.best_pair_reason }}</span>
-                </div>
-              </div>
+            <div class="detail-card">
+              <div class="detail-card__label">Après</div>
+              <div class="detail-card__text">{{ selectedChange.right_raw || '—' }}</div>
             </div>
           </div>
-        </transition>
+
+          <div v-if="selectedChange.lexical_diff_ops?.length" class="diff-inline">
+            <span
+              v-for="(op, index) in selectedChange.lexical_diff_ops"
+              :key="`${selectedChange.change_id}-${index}`"
+              class="diff-inline__op"
+              :class="{
+                'diff-inline__op--insert': op.op === 'insert',
+                'diff-inline__op--delete': op.op === 'delete',
+                'diff-inline__op--equal': op.op === 'equal',
+              }"
+            >{{ op.text }}</span>
+          </div>
+
+          <button type="button" class="debug-toggle" @click="debugOpen = !debugOpen">
+            <v-icon size="15" :icon="debugOpen ? 'mdi-chevron-up' : 'mdi-chevron-down'" />
+            Détails techniques
+          </button>
+
+          <div v-if="debugOpen" class="debug-grid">
+            <div class="debug-item"><span>Alignment</span><strong>{{ selectedChange.alignment_source }}</strong></div>
+            <div class="debug-item"><span>Confidence</span><strong>{{ selectedChange.alignment_confidence }}</strong></div>
+            <div class="debug-item"><span>Field</span><strong>{{ selectedChange.field_type }}</strong></div>
+            <div class="debug-item"><span>Reason</span><strong>{{ selectedChange.pairing_reason || 'n/a' }}</strong></div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-/* ═══════════════════════════════════════
-   FULL-HEIGHT APP LAYOUT
-   ═══════════════════════════════════════ */
-
-/* Empty state */
 .empty-root {
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 70vh;
 }
+
 .empty-card {
   text-align: center;
   padding: 48px;
@@ -436,93 +309,135 @@ async function rerunAnalyze() {
   box-shadow: 0 8px 30px rgba(15, 23, 42, 0.06);
 }
 
-/* Root: fills the viewport below the app-bar */
 .app-root {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 64px - 48px); /* app-bar + container padding */
-  margin: -24px; /* counteract v-container pa-6 */
-  overflow: hidden;
+  min-height: calc(100vh - 64px - 48px);
+  margin: -24px;
   background: #f8fafc;
 }
 
-/* ═══ HEADER ═══ */
 .app-header {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 0 16px;
-  height: 48px;
+  min-height: 52px;
   background: #0f172a;
   color: #e2e8f0;
-  flex-shrink: 0;
 }
-.app-header__left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.app-header__title {
-  font-weight: 700;
-  font-size: 0.9rem;
-  letter-spacing: -0.01em;
-}
-.app-header__stats {
-  display: flex;
-  gap: 8px;
-  flex: 1;
-  justify-content: center;
-}
+
+.app-header__left,
 .app-header__right {
   display: flex;
   align-items: center;
   gap: 8px;
 }
+
+.app-header__title {
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.app-header__stats {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
 .strat-sel {
   width: 130px;
 }
+
 .strat-sel :deep(.v-field) {
   background: rgba(255, 255, 255, 0.08) !important;
   border-color: rgba(255, 255, 255, 0.15) !important;
   color: #e2e8f0;
-  font-size: 0.8rem;
 }
 
-/* Pills in header */
 .pill {
   display: inline-flex;
   align-items: center;
-  padding: 3px 10px;
+  padding: 4px 10px;
   border-radius: 999px;
   font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  white-space: nowrap;
+  font-weight: 700;
 }
-.pill--danger { background: rgba(239, 68, 68, 0.18); color: #fca5a5; }
-.pill--warn { background: rgba(234, 179, 8, 0.18); color: #fde68a; }
-.pill--ok { background: rgba(22, 163, 74, 0.18); color: #86efac; }
-.pill--muted { background: rgba(148, 163, 184, 0.12); color: #94a3b8; }
 
-/* ═══ WORKSPACE (sidebar + center) ═══ */
-.workspace {
+.pill--danger {
+  background: rgba(239, 68, 68, 0.18);
+  color: #fecaca;
+}
+
+.pill--muted {
+  background: rgba(148, 163, 184, 0.12);
+  color: #cbd5e1;
+}
+
+.pill--success {
+  background: rgba(22, 163, 74, 0.18);
+  color: #bbf7d0;
+}
+
+.summary-strip {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem;
+  border-bottom: 1px solid #e2e8f0;
+  background: #fff;
+}
+
+.summary-strip__label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+}
+
+.summary-strip__text {
+  margin-top: 0.25rem;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: #334155;
+  white-space: pre-wrap;
+}
+
+.summary-strip__groups {
   display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.group-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
   flex: 1;
   min-height: 0;
-  overflow: hidden;
 }
 
-/* ═══ ISSUE RAIL ═══ */
-.issue-rail {
-  width: 300px;
-  min-width: 300px;
+.change-rail {
   background: #fff;
   border-right: 1px solid #e2e8f0;
   display: flex;
   flex-direction: column;
-  flex-shrink: 0;
+  min-height: 0;
 }
-.issue-rail__head {
+
+.change-rail__head {
   padding: 14px 16px;
   font-size: 0.72rem;
   font-weight: 700;
@@ -534,403 +449,241 @@ async function rerunAnalyze() {
   align-items: center;
   justify-content: space-between;
 }
-.issue-rail__count {
+
+.change-rail__count {
   background: #f1f5f9;
   color: #64748b;
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 0.7rem;
 }
-.issue-rail__scroll {
+
+.change-rail__scroll {
   flex: 1;
   overflow-y: auto;
   padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-/* Issue card */
-.issue-card {
-  display: flex;
-  gap: 10px;
-  text-align: left;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid transparent;
-  background: transparent;
-  cursor: pointer;
-  transition: all 0.1s;
-}
-.issue-card:hover { background: #f8fafc; border-color: #e2e8f0; }
-.issue-card--active { background: #eff6ff; border-color: #93c5fd; }
-.issue-card__dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-top: 6px;
-  flex-shrink: 0;
-}
-.issue-card__body { flex: 1; min-width: 0; }
-.issue-card__row {
-  display: flex;
-  align-items: center;
+  display: grid;
   gap: 6px;
 }
-.issue-card__claim {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: #1e293b;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-  min-width: 0;
-}
-.issue-card__badge {
-  font-size: 0.6rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  padding: 1px 6px;
-  border-radius: 4px;
-  letter-spacing: 0.03em;
-  white-space: nowrap;
-}
-.issue-card__summary {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  font-size: 0.72rem;
-  color: #94a3b8;
-  margin-top: 3px;
-  line-height: 1.4;
-}
 
-/* ═══ PDF AREA ═══ */
-.pdf-area {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-}
-
-/* Verdict bar */
-.verdict-bar {
-  display: flex;
-  align-items: center;
-  gap: 0;
-  height: 40px;
-  background: #fff;
-  border-bottom: 1px solid #e2e8f0;
-  flex-shrink: 0;
-}
-.verdict-bar__indicator {
-  width: 3px;
-  height: 100%;
-  flex-shrink: 0;
-}
-.verdict-bar__content {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex: 1;
-  min-width: 0;
-  padding: 0 12px;
-  overflow: hidden;
-}
-.verdict-bar__tag {
-  font-size: 0.65rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  padding: 2px 8px;
-  border-radius: 5px;
-  letter-spacing: 0.03em;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.verdict-bar__claim {
-  font-size: 0.82rem;
-  font-weight: 600;
-  color: #1e293b;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.verdict-bar__sep {
-  color: #e2e8f0;
-  font-size: 0.8rem;
-  flex-shrink: 0;
-}
-.verdict-bar__text {
-  font-size: 0.78rem;
-  color: #64748b;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.verdict-bar__toggle {
-  padding: 0 12px;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  cursor: pointer;
-  color: #94a3b8;
-  flex-shrink: 0;
-  background: none;
-  border: none;
-  border-left: 1px solid #f1f5f9;
-  transition: color 0.12s;
-}
-.verdict-bar__toggle:hover { color: #475569; }
-
-/* PDF split */
-.pdf-split {
-  display: flex;
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-}
-.pdf-pane {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-}
-.pdf-divider {
-  width: 1px;
-  background: #e2e8f0;
-  flex-shrink: 0;
-}
-
-/* ═══ BOTTOM PANEL ═══ */
-.bottom-panel {
-  background: #fff;
-  border-top: 1px solid #e2e8f0;
-  flex-shrink: 0;
-  max-height: 240px;
-  display: flex;
-  flex-direction: column;
-}
-
-/* Panel tabs */
-.bottom-panel__tabs {
-  display: flex;
-  gap: 0;
-  border-bottom: 1px solid #f1f5f9;
-  padding: 0 12px;
-  flex-shrink: 0;
-}
-.bp-tab {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 8px 14px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: #94a3b8;
-  cursor: pointer;
-  border: none;
-  background: none;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-  transition: all 0.1s;
-}
-.bp-tab:hover { color: #475569; }
-.bp-tab--active { color: #1e293b; border-bottom-color: #3b82f6; }
-
-/* Panel body */
-.bottom-panel__body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 14px 16px;
-}
-
-/* Grid layout for decision/meta */
-.bp-grid {
+.change-rail__empty {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 12px 20px;
-}
-.bp-field {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.bp-field--full {
-  grid-column: 1 / -1;
-}
-.bp-label {
-  font-size: 0.65rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #94a3b8;
-  font-weight: 600;
-}
-.bp-value {
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: #1e293b;
-}
-.bp-value--tag {
-  display: inline-block;
-  width: fit-content;
-  padding: 2px 8px;
-  border-radius: 5px;
-  text-transform: uppercase;
-  font-size: 0.72rem;
-  letter-spacing: 0.03em;
-}
-.bp-value--prose {
-  font-weight: 400;
-  font-size: 0.82rem;
+  justify-items: start;
+  gap: 0.4rem;
+  padding: 1rem;
   color: #475569;
-  line-height: 1.55;
 }
 
-/* Diffs */
-.bp-diffs {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.bp-diff-card {
-  padding: 12px 14px;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  min-width: 220px;
-  flex: 1;
-}
-.bp-diff-card__head {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 8px;
+.change-rail__empty-title {
+  font-size: 0.86rem;
   font-weight: 700;
-  font-size: 0.82rem;
-  color: #334155;
+  color: #0f172a;
 }
-.bp-diff-card__kind {
-  font-size: 0.6rem;
+
+.change-rail__empty-copy {
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.change-card {
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.change-card:hover {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+}
+
+.change-card--active {
+  background: #eff6ff;
+  border-color: #93c5fd;
+}
+
+.change-card__top,
+.change-card__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.change-card__title {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.change-card__importance {
+  font-size: 0.68rem;
   font-weight: 700;
   text-transform: uppercase;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: #f0fdf4;
-  color: #16a34a;
-}
-.bp-diff-card__kind--bad {
-  background: #fef2f2;
   color: #dc2626;
 }
-.bp-diff-card__row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 4px;
-  font-size: 0.85rem;
-  color: #334155;
-}
-.bp-diff-card__side {
-  font-size: 0.68rem;
-  font-weight: 700;
-  width: 20px;
-  height: 20px;
-  border-radius: 5px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-}
-.bp-diff-card__side--a { background: #dc2626; }
-.bp-diff-card__side--b { background: #0f766e; }
 
-/* Evidence */
-.bp-evidence {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
+.change-card__meta {
+  margin-top: 0.35rem;
+  font-size: 0.7rem;
+  color: #64748b;
+  flex-wrap: wrap;
 }
-.bp-evidence__col {
+
+.change-card__summary {
+  margin-top: 0.45rem;
+  font-size: 0.74rem;
+  line-height: 1.45;
+  color: #475569;
+}
+
+.pdf-area {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.detail-bar {
+  padding: 0.85rem 1rem;
+  background: #fff;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.detail-bar--empty {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.detail-bar__title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.detail-bar__summary {
+  margin-top: 0.3rem;
+  font-size: 0.82rem;
+  color: #64748b;
+}
+
+.pdf-split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.pdf-pane {
   min-width: 0;
 }
-.bp-evidence__head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+
+.detail-panel {
+  padding: 0 1rem 1rem;
+  display: grid;
+  gap: 0.875rem;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.875rem;
+}
+
+.detail-card {
+  padding: 0.95rem 1rem;
+  border-radius: 0.9rem;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+}
+
+.detail-card__label {
+  font-size: 0.72rem;
   font-weight: 700;
-  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+}
+
+.detail-card__text {
+  margin-top: 0.5rem;
+  font-size: 0.86rem;
+  line-height: 1.55;
   color: #334155;
-  margin-bottom: 10px;
-}
-.bp-evidence__cnt {
-  font-size: 0.65rem;
-  font-weight: 700;
-  padding: 1px 7px;
-  border-radius: 999px;
-  color: #fff;
-}
-.bp-evidence__cnt--a { background: #dc2626; }
-.bp-evidence__cnt--b { background: #0f766e; }
-.bp-empty {
-  font-size: 0.8rem;
-  color: #94a3b8;
-}
-.bp-ev {
-  padding: 10px;
-  border: 1px solid #f1f5f9;
-  border-radius: 8px;
-  margin-bottom: 8px;
-}
-.bp-ev__meta {
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.68rem;
-  color: #94a3b8;
-  margin-bottom: 4px;
-}
-.bp-ev__section {
-  display: inline-block;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: #eff6ff;
-  color: #1d4ed8;
-  font-size: 0.68rem;
-  font-weight: 600;
-  margin-bottom: 5px;
-}
-.bp-ev__text {
-  font-size: 0.8rem;
-  color: #334155;
-  line-height: 1.5;
   white-space: pre-wrap;
+  word-break: break-word;
 }
 
-/* Slide panel transition */
-.slide-panel-enter-active,
-.slide-panel-leave-active {
-  transition: max-height 0.2s ease, opacity 0.15s ease;
-}
-.slide-panel-enter-from,
-.slide-panel-leave-to {
-  max-height: 0;
-  opacity: 0;
-}
-.slide-panel-enter-to,
-.slide-panel-leave-from {
-  max-height: 240px;
-  opacity: 1;
+.diff-inline {
+  padding: 0.9rem 1rem;
+  border-radius: 0.9rem;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  line-height: 1.8;
 }
 
-/* ═══ RESPONSIVE ═══ */
+.diff-inline__op--insert {
+  background: rgba(34, 197, 94, 0.15);
+  color: #166534;
+}
+
+.diff-inline__op--delete {
+  background: rgba(239, 68, 68, 0.15);
+  color: #991b1b;
+  text-decoration: line-through;
+}
+
+.debug-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: fit-content;
+  border: none;
+  background: none;
+  color: #475569;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.debug-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+}
+
+.debug-item {
+  padding: 0.9rem 1rem;
+  border-radius: 0.85rem;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.debug-item span {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+}
+
+.debug-item strong {
+  font-size: 0.85rem;
+  color: #0f172a;
+}
+
 @media (max-width: 1100px) {
-  .app-root { height: auto; overflow: auto; margin: -24px; }
-  .workspace { flex-direction: column; }
-  .issue-rail { width: 100%; min-width: 0; max-height: 200px; border-right: none; border-bottom: 1px solid #e2e8f0; }
-  .issue-rail__scroll { flex-direction: row; overflow-x: auto; overflow-y: hidden; }
-  .issue-card { min-width: 240px; }
-  .pdf-split { flex-direction: column; }
-  .pdf-divider { width: 100%; height: 1px; }
-  .bp-evidence { grid-template-columns: 1fr; }
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .pdf-split,
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

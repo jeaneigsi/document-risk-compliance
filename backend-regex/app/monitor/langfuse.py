@@ -49,6 +49,7 @@ class LangfuseTracker:
                 input=input_payload,
                 metadata=metadata or {},
             )
+            self._client.flush()
             return getattr(trace, "id", trace_id)
         except Exception:
             return trace_id
@@ -69,6 +70,7 @@ class LangfuseTracker:
                 output=output,
                 metadata=metadata or {},
             )
+            self._client.flush()
         except Exception:
             return
 

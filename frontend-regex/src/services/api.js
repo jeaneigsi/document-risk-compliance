@@ -58,7 +58,6 @@ export const llmApi = {
 }
 
 export const compareApi = {
-  suggestClaims: (payload) => api.post('/compare/suggest-claims', payload),
   analyze: (payload) => api.post('/compare/analyze', payload),
 }
 

@@ -14,7 +14,10 @@ dependencies = [
     "pydantic-settings>=2.1.0",
     "boto3>=1.34.0",
     "litellm>=1.74.0",
+    "diff-match-patch>=20241021",
     "pymupdf>=1.24.0",
+    "langfuse>=2.0.0",
+    "pytest>=9.0.2",
 ]
 
 [project.optional-dependencies]

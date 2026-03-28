@@ -187,21 +187,12 @@ class LLMAnalyzeDocumentResponse(BaseModel):
     usage: dict
 
 
-class CompareSuggestClaimsRequest(BaseModel):
-    left_document_id: str
-    right_document_id: str
-    limit: int = 8
-
-
 class CompareAnalyzeRequest(BaseModel):
     left_document_id: str
     right_document_id: str
-    claims: list[str] = Field(default_factory=list)
-    auto_diff: bool = True
     model: Optional[str] = None
     index_name: str = "default"
     strategy: str = "hybrid"
-    top_k: int = 5
 
 
 class EvalSearchSampleRequest(BaseModel):
@@ -848,26 +839,9 @@ async def llm_analyze_document(payload: LLMAnalyzeDocumentRequest):
     )
 
 
-@router.post("/compare/suggest-claims", tags=["compare"])
-async def compare_suggest_claims(payload: CompareSuggestClaimsRequest):
-    """Suggest business-relevant compare claims from two extracted documents."""
-    storage = get_minio_storage()
-    pipeline = CompareDocumentsPipeline()
-    left = _prepare_compare_document(storage, payload.left_document_id)
-    right = _prepare_compare_document(storage, payload.right_document_id)
-    suggestions = pipeline.suggest_claims(left=left, right=right, limit=payload.limit)
-    return {
-        "status": "completed",
-        "left_document_id": payload.left_document_id,
-        "right_document_id": payload.right_document_id,
-        "count": len(suggestions),
-        "suggestions": suggestions,
-    }
-
-
 @router.post("/compare/analyze", tags=["compare"])
 async def compare_analyze(payload: CompareAnalyzeRequest):
-    """Compare two documents with retrieval-grounded LLM analysis."""
+    """Compare two documents with a diff-first pipeline."""
     storage = get_minio_storage()
     pipeline = CompareDocumentsPipeline()
     left = _prepare_compare_document(storage, payload.left_document_id)
@@ -875,11 +849,8 @@ async def compare_analyze(payload: CompareAnalyzeRequest):
     return await pipeline.analyze(
         left=left,
         right=right,
-        claims=payload.claims,
-        auto_diff=payload.auto_diff,
         strategy=payload.strategy,
         index_name=payload.index_name,
-        top_k=payload.top_k,
         model=payload.model,
     )
 

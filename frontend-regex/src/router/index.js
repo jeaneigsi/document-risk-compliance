@@ -47,13 +47,13 @@ const routes = [
     path: '/llm',
     name: 'llm',
     component: () => import('@/views/LLMView.vue'),
-    meta: { title: 'Analyse LLM', icon: 'mdi-robot' },
+    meta: { title: 'Vérifier un document', icon: 'mdi-robot' },
   },
   {
     path: '/compare',
     name: 'compare',
     component: () => import('@/views/CompareDocsView.vue'),
-    meta: { title: 'Compare 2 Docs', icon: 'mdi-file-compare' },
+    meta: { title: 'Comparer 2 documents', icon: 'mdi-file-compare' },
   },
   {
     path: '/compare/result',

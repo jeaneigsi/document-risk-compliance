@@ -63,7 +63,7 @@ class SearchPipeline:
             semantic_candidate_count = 0
             lexical_candidate_count = 0
             semantic_error: str | None = None
-            semantic_top_k_internal = max(top_k, min(50, top_k * 3))
+            semantic_top_k_internal = max(top_k, min(12, top_k + 2))
 
             if strategy in ("semantic", "hybrid"):
                 try:
