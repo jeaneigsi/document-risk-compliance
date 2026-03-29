@@ -1,8 +1,5 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import VuePdfEmbed from 'vue-pdf-embed'
-import 'vue-pdf-embed/dist/styles/annotationLayer.css'
-import 'vue-pdf-embed/dist/styles/textLayer.css'
 import { documentsApi } from '@/services/api'
 
 const props = defineProps({
@@ -20,14 +17,8 @@ const emit = defineEmits(['update:page', 'expand'])
 
 const zoom = ref(1)
 const renderError = ref('')
-const renderKey = ref(0)
 const pageScrollRef = ref(null)
 const viewportWidth = ref(0)
-
-const pdfSource = computed(() => {
-  if (!props.documentId) return null
-  return documentsApi.fileUrl(props.documentId)
-})
 
 const viewerBodyHeight = computed(() =>
   typeof props.viewerHeight === 'number' ? `${props.viewerHeight}px` : props.viewerHeight
@@ -36,6 +27,11 @@ const viewerBodyHeight = computed(() =>
 const renderWidth = computed(() => {
   const baseWidth = Math.max(280, Math.floor((viewportWidth.value || 0) - 4))
   return Math.max(280, Math.round(baseWidth * zoom.value))
+})
+const pageImageScale = computed(() => Number(Math.max(1, Math.min(4, 1.6 * zoom.value)).toFixed(2)))
+const pageImageUrl = computed(() => {
+  if (!props.documentId || !props.page) return ''
+  return documentsApi.renderPageUrl(props.documentId, props.page, pageImageScale.value)
 })
 
 watch(
@@ -49,7 +45,6 @@ watch(
   () => props.documentId,
   () => {
     zoom.value = 1
-    renderKey.value += 1
   }
 )
 
@@ -93,12 +88,12 @@ function resetZoom() {
   zoom.value = 1
 }
 
-function onRenderFailed(error) {
-  renderError.value = error?.message || 'Le rendu PDF a échoué.'
+function onImageLoaded() {
+  renderError.value = ''
 }
 
-function onLoadingFailed(error) {
-  renderError.value = error?.message || 'Le document PDF n’a pas pu être chargé.'
+function onImageFailed() {
+  renderError.value = 'Le rendu de la page PDF a échoué.'
 }
 
 function overlayStyle(item) {
@@ -169,16 +164,14 @@ function overlayStyle(item) {
         <div ref="pageScrollRef" class="page-scroll" :style="{ height: viewerBodyHeight }">
           <div class="page-shell">
             <div class="page-render">
-              <VuePdfEmbed
-                :key="`${renderKey}-${documentId}-${page}`"
-                class="pdf-embed"
-                :source="pdfSource"
-                :page="page"
-                :width="renderWidth"
-                text-layer
-                annotation-layer
-                @loading-failed="onLoadingFailed"
-                @rendering-failed="onRenderFailed"
+              <img
+                :key="`${documentId}-${page}-${pageImageScale}`"
+                class="pdf-image"
+                :src="pageImageUrl"
+                :alt="`Page ${page} de ${filename || title || 'document PDF'}`"
+                :style="{ width: `${renderWidth}px` }"
+                @load="onImageLoaded"
+                @error="onImageFailed"
               />
               <div class="overlay-layer">
                 <div
@@ -332,29 +325,12 @@ function overlayStyle(item) {
   flex: 0 0 auto;
 }
 
-.pdf-embed {
+.pdf-image {
   display: block;
   border-radius: 0.75rem;
-  overflow: hidden;
   box-shadow: 0 0.625rem 2.5rem rgba(15, 23, 42, 0.16);
   background: #fff;
-}
-
-.pdf-embed :deep(.vue-pdf-embed__page) {
-  position: relative;
-  margin: 0;
-}
-
-.pdf-embed :deep(canvas) {
-  display: block;
-  width: 100%;
-  height: auto;
-  border-radius: 0.75rem;
-}
-
-.pdf-embed :deep(.textLayer),
-.pdf-embed :deep(.annotationLayer) {
-  inset: 0;
+  max-width: none;
 }
 
 .overlay-layer {

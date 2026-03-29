@@ -15,8 +15,10 @@ const indexName = ref('default')
 const compareMode = ref('adaptive')
 const loading = ref(false)
 const error = ref('')
+const historyLoading = ref(false)
 const uploadInput = ref(null)
 const uploadTarget = ref('left')
+const compareRuns = ref([])
 
 const completedDocs = computed(() => (store.documents || []).filter((doc) => doc.status === 'completed'))
 const documentItems = computed(() =>
@@ -32,10 +34,29 @@ const rightDocument = computed(() =>
   completedDocs.value.find((doc) => (doc.document_id || doc.id) === rightDocumentId.value)
 )
 const compareReady = computed(() => Boolean(leftDocumentId.value && rightDocumentId.value))
+const compareHistory = computed(() =>
+  compareRuns.value.map((run) => ({
+    ...run,
+    leftFilename: completedDocs.value.find((doc) => (doc.document_id || doc.id) === run.left_document_id)?.filename || run.left_document_id,
+    rightFilename: completedDocs.value.find((doc) => (doc.document_id || doc.id) === run.right_document_id)?.filename || run.right_document_id,
+  }))
+)
 
 onMounted(async () => {
-  await store.fetchDocuments()
+  await Promise.all([store.fetchDocuments(), loadCompareHistory()])
 })
+
+async function loadCompareHistory() {
+  historyLoading.value = true
+  try {
+    const { data } = await compareApi.listRuns(12)
+    compareRuns.value = data.runs || []
+  } catch (e) {
+    console.error('compare history load failed', e)
+  } finally {
+    historyLoading.value = false
+  }
+}
 
 function triggerUpload(target) {
   uploadTarget.value = target
@@ -97,12 +118,18 @@ async function analyze() {
       compareMode: compareMode.value,
       result: data.result || null,
     })
+    await loadCompareHistory()
     await router.push({ name: 'compare-result', params: { runId: data.run_id } })
   } catch (e) {
     error.value = e.response?.data?.detail || e.message
   } finally {
     loading.value = false
   }
+}
+
+function openRun(runId) {
+  if (!runId) return
+  router.push({ name: 'compare-result', params: { runId } })
 }
 </script>
 
@@ -252,6 +279,46 @@ async function analyze() {
           </v-btn>
         </v-card-text>
       </v-card>
+
+      <v-card class="surface-card">
+        <v-card-title class="card-title-row">
+          <div>
+            <div class="card-title-text">Historique des comparaisons</div>
+            <div class="card-subtitle-text">Rouvre un run existant sans relancer toute l’analyse.</div>
+          </div>
+          <v-btn variant="text" prepend-icon="mdi-refresh" size="small" :loading="historyLoading" @click="loadCompareHistory">
+            Actualiser
+          </v-btn>
+        </v-card-title>
+        <v-card-text class="card-body">
+          <div v-if="compareHistory.length === 0" class="history-empty">
+            Aucun run compare enregistré pour l’instant.
+          </div>
+          <div v-else class="history-list">
+            <button
+              v-for="run in compareHistory"
+              :key="run.run_id"
+              type="button"
+              class="history-row"
+              @click="openRun(run.run_id)"
+            >
+              <div class="history-row__main">
+                <div class="history-row__files">
+                  <span class="history-row__file">{{ run.leftFilename }}</span>
+                  <span class="history-row__arrow">→</span>
+                  <span class="history-row__file">{{ run.rightFilename }}</span>
+                </div>
+                <div class="history-row__meta">
+                  <span>{{ new Date(run.created_at).toLocaleString() }}</span>
+                  <span>{{ run.strategy }}</span>
+                  <span>{{ run.status }}</span>
+                </div>
+              </div>
+              <v-icon icon="mdi-open-in-new" size="18" />
+            </button>
+          </div>
+        </v-card-text>
+      </v-card>
     </div>
   </div>
 </template>
@@ -374,6 +441,64 @@ async function analyze() {
   gap: 0.35rem;
   font-size: 0.86rem;
   color: #475569;
+}
+
+.history-empty {
+  padding: 0.75rem 0;
+  font-size: 0.88rem;
+  color: #64748b;
+}
+
+.history-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.history-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  width: 100%;
+  padding: 0.9rem 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 0.9rem;
+  background: #fff;
+  text-align: left;
+}
+
+.history-row__main {
+  min-width: 0;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.history-row__files {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.history-row__file {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.history-row__arrow {
+  color: #94a3b8;
+}
+
+.history-row__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  font-size: 0.76rem;
+  color: #64748b;
 }
 
 @media (min-width: 768px) {

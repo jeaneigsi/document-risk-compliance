@@ -10,6 +10,12 @@ DocVerify is a **document intelligence system** designed for risk and compliance
 
 **The solution:** A multi-stage pipeline that finds the right evidence, compares it intelligently, and sends only the minimal context needed to the model for a decision.
 
+## Demo
+
+https://github.com/user-attachments/assets/docs-regex/DocVerify_Pipeline.mp4
+
+> **[Download the full demo video](docs-regex/DocVerify_Pipeline.mp4)** if the player above doesn't render.
+
 ## Architecture
 
 ```
