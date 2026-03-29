@@ -56,13 +56,31 @@ def load_hf_dataset(name: str, split: str | None = None, **kwargs: Any):
     return load_dataset(name, split=split, **kwargs)
 
 
+def load_hf_dataset_config(dataset_id: str, config_name: str, split: str | None = None, **kwargs: Any):
+    """Load a Hugging Face dataset with an explicit configuration name."""
+
+    try:
+        from datasets import load_dataset  # type: ignore
+    except ImportError as exc:  # pragma: no cover - validated via tests
+        raise RuntimeError(
+            "The `datasets` package is required to load benchmark datasets"
+        ) from exc
+
+    token = _resolve_hf_token()
+    if "token" not in kwargs and token:
+        kwargs["token"] = token
+
+    if split is None:
+        return load_dataset(dataset_id, config_name, **kwargs)
+    return load_dataset(dataset_id, config_name, split=split, **kwargs)
+
+
 def load_find_dataset(split: str = "validation"):
     return load_hf_dataset("kensho/FIND", split=split)
 
 
 def load_wikipedia_contradict(split: str = "train"):
     return load_hf_dataset("ibm-research/Wikipedia_contradict_benchmark", split=split)
-
 
 def load_longbench(split: str = "test"):
     return load_hf_dataset("yanbingzheng/LongBench", split=split)

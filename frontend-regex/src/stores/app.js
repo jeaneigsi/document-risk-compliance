@@ -167,6 +167,7 @@ export const useAppStore = defineStore('app', () => {
       const payload = {
         dataset_name: config.datasetName || 'kensho/FIND',
         split: config.split,
+        dataset_subset: config.datasetSubset || null,
         max_samples: config.maxSamples,
         index_name: config.indexName,
         top_k: config.topK,

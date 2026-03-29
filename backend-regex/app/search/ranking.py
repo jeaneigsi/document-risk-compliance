@@ -28,8 +28,8 @@ def fuse_search_results(
     semantic_results: list[dict[str, Any]],
     lexical_results: list[dict[str, Any]],
     top_k: int = 10,
-    semantic_weight: float = 0.7,
-    lexical_weight: float = 0.3,
+    semantic_weight: float = 0.55,
+    lexical_weight: float = 0.45,
 ) -> list[dict[str, Any]]:
     """Fuse semantic and lexical results using calibrated score + rank signals."""
 
@@ -95,6 +95,10 @@ def fuse_search_results(
     fused = []
     for entry in by_id.values():
         entry["sources"] = sorted(entry["sources"])
+        if len(entry["sources"]) == 2:
+            entry["score"] += 0.08
+        elif "lexical" in entry["sources"] and (entry.get("lexical_rank") or 999) <= max(3, top_k // 2):
+            entry["score"] += 0.03
         entry["score"] = round(float(entry["score"]), 6)
         fused.append(entry)
 

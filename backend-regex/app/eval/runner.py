@@ -3,7 +3,11 @@
 import logging
 from time import perf_counter
 
-from app.eval.datasets import load_find_eval_pack, load_wikipedia_contradict_eval_pack
+from app.eval.datasets import (
+    load_find_eval_pack,
+    load_nanobeir_eval_pack,
+    load_wikipedia_contradict_eval_pack,
+)
 from app.eval.baseline import BaselineLexicalRetriever
 from app.eval.metrics import (
     mrr,
@@ -245,6 +249,7 @@ class EvaluationRunner:
         self,
         dataset_name: str = "kensho/FIND",
         split: str = "validation",
+        dataset_subset: str | None = None,
         max_samples: int = 100,
         index_name: str = "default",
         top_k: int = 10,
@@ -262,6 +267,13 @@ class EvaluationRunner:
                 streaming=streaming,
                 cache_dir=cache_dir,
                 max_query_chars=max_query_chars,
+            )
+        elif dataset_name == "sionic-ai/NanoBEIR-en":
+            pack = load_nanobeir_eval_pack(
+                subset=dataset_subset or "NanoSciFact",
+                max_samples=max_samples,
+                index_name=index_name,
+                cache_dir=cache_dir,
             )
         elif dataset_name == "ibm-research/Wikipedia_contradict_benchmark":
             pack = load_wikipedia_contradict_eval_pack(

@@ -252,9 +252,10 @@ class EvalEconomicsRequest(BaseModel):
 
 
 class EvalFindExperimentRequest(BaseModel):
-    """Run phase-8 strategy comparison on FIND subset."""
+    """Run retrieval strategy comparison on a supported benchmark dataset."""
     dataset_name: str = "kensho/FIND"
     split: str = "validation"
+    dataset_subset: Optional[str] = None
     max_samples: int = 100
     index_name: str = "default"
     top_k: int = 10
@@ -1016,12 +1017,13 @@ async def evaluate_economics(payload: EvalEconomicsRequest):
 
 @router.post("/eval/experiments/find", tags=["eval"])
 async def eval_find_experiment(payload: EvalFindExperimentRequest):
-    """Run phase-8 strategy comparison on FIND with streaming-friendly defaults."""
+    """Run retrieval benchmark on a supported dataset with streaming-friendly defaults."""
     runner = EvaluationRunner()
     try:
         result = await runner.run_find_experiment(
             dataset_name=payload.dataset_name,
             split=payload.split,
+            dataset_subset=payload.dataset_subset,
             max_samples=payload.max_samples,
             index_name=payload.index_name,
             top_k=payload.top_k,

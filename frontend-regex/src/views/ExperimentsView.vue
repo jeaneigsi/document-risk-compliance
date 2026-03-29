@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 
@@ -9,6 +9,7 @@ const router = useRouter()
 const experimentConfig = ref({
   datasetName: 'kensho/FIND',
   split: 'validation',
+  datasetSubset: null,
   maxSamples: 100,
   indexName: 'default',
   topK: 10,
@@ -22,13 +23,28 @@ const runningExperiment = ref(false)
 const experimentLogs = ref([])
 const datasetOptions = [
   { title: 'FIND', value: 'kensho/FIND' },
+  { title: 'NanoBEIR (streaming)', value: 'sionic-ai/NanoBEIR-en' },
   { title: 'Wikipedia Contradict', value: 'ibm-research/Wikipedia_contradict_benchmark' },
 ]
+const nanoBeirSubsetOptions = ['NanoSciFact', 'NanoNFCorpus', 'NanoFiQA2018', 'NanoArguAna']
 const splitOptions = computed(() =>
   experimentConfig.value.datasetName === 'ibm-research/Wikipedia_contradict_benchmark'
     ? ['train']
     : ['validation', 'test']
 )
+watch(splitOptions, (options) => {
+  if (experimentConfig.value.datasetName !== 'sionic-ai/NanoBEIR-en' && !options.includes(experimentConfig.value.split)) {
+    experimentConfig.value.split = options[0]
+  }
+}, { immediate: true })
+watch(() => experimentConfig.value.datasetName, (datasetName) => {
+  if (datasetName === 'sionic-ai/NanoBEIR-en') {
+    experimentConfig.value.datasetSubset = experimentConfig.value.datasetSubset || 'NanoSciFact'
+    experimentConfig.value.split = 'validation'
+  } else {
+    experimentConfig.value.datasetSubset = null
+  }
+}, { immediate: true })
 const canRunExperiment = computed(() =>
   !runningExperiment.value
   && Number(experimentConfig.value.maxSamples) > 0
@@ -41,11 +57,25 @@ const strategies = [
   { title: 'Baseline (naïf)', value: 'baseline' },
   { title: 'Lexical (Cursor-like)', value: 'lexical' },
   { title: 'Sémantique (NextPlaid)', value: 'semantic' },
-  { title: 'Hybride', value: 'hybrid' },
+  { title: 'Hybride (recherche)', value: 'hybrid' },
   { title: 'RG (full scan regex)', value: 'rg' },
 ]
 
 const experimentHistory = computed(() => store.experimentHistory.slice(0, 10))
+const resultSummary = computed(() => {
+  const comparison = store.experimentResults?.comparison
+  if (!comparison) return null
+  const bestStrategy = comparison.best_strategy_by_recall || '-'
+  const reports = comparison.reports || {}
+  const bestRow = reports[bestStrategy] || null
+  return {
+    bestStrategy,
+    recall: Number(bestRow?.mean_recall_at_k || 0),
+    latency: Number(bestRow?.mean_latency_ms || 0),
+    samples: Number(store.experimentResults?.samples_count || 0),
+    skipped: Number(store.experimentResults?.skipped_too_long_queries || 0),
+  }
+})
 
 onMounted(async () => {
   await Promise.all([
@@ -94,40 +124,6 @@ const comparisonChart = computed(() => {
         type: 'line',
         yAxisIndex: 1,
         data: comparisonRows.value.map(c => c.mean_ndcg_at_k || 0),
-      },
-    ],
-  }
-})
-
-const strategyRadar = computed(() => {
-  if (comparisonRows.value.length === 0) return null
-
-  const strategies = comparisonRows.value.map(c => c.strategy)
-  return {
-    tooltip: {},
-    legend: { data: strategies },
-    radar: {
-      indicator: [
-        { name: 'Recall@5', max: 1 },
-        { name: 'MRR', max: 1 },
-        { name: 'nDCG@10', max: 1 },
-        { name: 'Latence', max: 1 },
-        { name: 'Candidats', max: 100 },
-      ],
-    },
-    series: [
-      {
-        type: 'radar',
-        data: comparisonRows.value.map((c) => ({
-          value: [
-            c.mean_recall_at_k || 0,
-            c.mean_mrr || 0,
-            c.mean_ndcg_at_k || 0,
-            1 - ((c.mean_latency_ms || 0) / 10000),
-            c.mean_candidate_count || 0,
-          ],
-          name: c.strategy,
-        })),
       },
     ],
   }
@@ -188,39 +184,73 @@ function openRun(runId) {
 </script>
 
 <template>
-  <div>
-    <v-row class="mb-6">
+  <div class="experiments-view">
+    <v-row class="mb-5">
       <v-col cols="12">
         <h1 class="text-h4 font-weight-bold">
           <v-icon icon="mdi-flask" class="mr-2" />
-          Expériences Scientifiques
+          Benchmarks de recherche
         </h1>
         <p class="text-body-1 text-medium-emphasis">
-          Comparez les stratégies de recherche et détection
+          Mesure la qualité de récupération des stratégies de recherche. Cette surface benchmarke le retrieval, pas le compareur diff-first.
         </p>
+        <v-alert type="info" variant="tonal" class="mt-4 experiments-alert">
+          Ici, <strong>hybrid</strong> signifie <strong>recherche hybride</strong>:
+          fusion sémantique + lexicale pour retrouver les bons passages.
+          Ce n'est pas le mode <strong>adaptive/full lexical</strong> du compareur documentaire.
+        </v-alert>
+        <v-alert type="warning" variant="tonal" class="mt-4 experiments-alert">
+          <strong>FIND</strong> reste utile comme sanity check, mais il favorise souvent le lexical exact.
+          Utilise <strong>NanoBEIR</strong> pour challenger plus sérieusement les stratégies actuelles sans cache local manuel.
+        </v-alert>
       </v-col>
     </v-row>
 
     <v-row>
-      <v-col cols="12" md="4">
-        <v-card>
+      <v-col cols="12" lg="4">
+        <v-card class="config-card">
           <v-card-title>
             <v-icon icon="mdi-cog" class="mr-2" />
             Configuration
           </v-card-title>
           <v-card-text>
+            <v-btn
+              color="primary"
+              size="large"
+              block
+              :loading="runningExperiment"
+              :disabled="!canRunExperiment"
+              @click="runExperiment"
+              class="mb-4"
+            >
+              <v-icon icon="mdi-play" class="mr-2" />
+              Lancer le benchmark
+            </v-btn>
+
             <v-select
               v-model="experimentConfig.datasetName"
               :items="datasetOptions"
               label="Dataset"
               variant="outlined"
+              density="compact"
             />
 
             <v-select
+              v-if="experimentConfig.datasetName !== 'sionic-ai/NanoBEIR-en'"
               v-model="experimentConfig.split"
               :items="splitOptions"
               label="Split"
               variant="outlined"
+              density="compact"
+            />
+
+            <v-select
+              v-if="experimentConfig.datasetName === 'sionic-ai/NanoBEIR-en'"
+              v-model="experimentConfig.datasetSubset"
+              :items="nanoBeirSubsetOptions"
+              label="Subset"
+              variant="outlined"
+              density="compact"
             />
 
             <v-text-field
@@ -228,6 +258,7 @@ function openRun(runId) {
               label="Nombre d'échantillons"
               type="number"
               variant="outlined"
+              density="compact"
             />
 
             <v-select
@@ -235,6 +266,7 @@ function openRun(runId) {
               :items="['default', 'documents', 'evidence']"
               label="Index"
               variant="outlined"
+              density="compact"
             />
 
             <v-select
@@ -242,6 +274,7 @@ function openRun(runId) {
               :items="[5, 10, 20, 50]"
               label="Top K"
               variant="outlined"
+              density="compact"
             />
 
             <v-select
@@ -250,93 +283,42 @@ function openRun(runId) {
               label="Stratégies à comparer"
               multiple
               variant="outlined"
+              density="compact"
             />
 
-            <v-switch
-              v-model="experimentConfig.streaming"
-              label="Mode streaming"
-              color="primary"
-            />
+            <v-expansion-panels variant="accordion" class="mb-2">
+              <v-expansion-panel>
+                <v-expansion-panel-title>Réglages avancés</v-expansion-panel-title>
+                <v-expansion-panel-text>
+                  <v-switch
+                    v-model="experimentConfig.streaming"
+                    label="Mode streaming dataset"
+                    color="primary"
+                    hide-details
+                    class="mb-2"
+                  />
 
-            <v-text-field
-              v-model.number="experimentConfig.maxQueryChars"
-              label="Max query chars"
-              type="number"
-              variant="outlined"
-            />
-
-            <v-btn
-              color="primary"
-              size="large"
-              block
-              :loading="runningExperiment"
-              :disabled="!canRunExperiment"
-              @click="runExperiment"
-            >
-              <v-icon icon="mdi-play" class="mr-2" />
-              Lancer l'expérience
-            </v-btn>
-          </v-card-text>
-        </v-card>
-      </v-col>
-
-      <v-col cols="12" md="8">
-        <v-card class="mb-4">
-          <v-card-title class="d-flex align-center">
-            <v-icon icon="mdi-chart-bar" class="mr-2" />
-            Comparaison des Stratégies
-            <v-spacer />
-            <v-btn
-              v-if="comparisonRows.length > 0"
-              variant="text"
-              size="small"
-              prepend-icon="mdi-download"
-              @click="exportResults"
-            >
-              Exporter
-            </v-btn>
-          </v-card-title>
-          <v-card-text>
-            <v-alert
-              v-if="!store.experimentResults.comparison"
-              type="info"
-              variant="tonal"
-            >
-              Lancez une expérience pour voir les résultats
-            </v-alert>
-            <v-chart
-              v-else
-              class="chart-container"
-              :option="comparisonChart"
-              autoresize
-            />
+                  <v-text-field
+                    v-model.number="experimentConfig.maxQueryChars"
+                    label="Longueur max des requêtes"
+                    type="number"
+                    variant="outlined"
+                    density="compact"
+                    hint="Évite les runs biaisés par des requêtes anormalement longues."
+                    persistent-hint
+                  />
+                </v-expansion-panel-text>
+              </v-expansion-panel>
+            </v-expansion-panels>
           </v-card-text>
         </v-card>
 
-        <v-card class="mb-4">
-          <v-card-title>
-            <v-icon icon="mdi-radar" class="mr-2" />
-            Radar des Performances
-          </v-card-title>
-          <v-card-text>
-            <v-chart
-              v-if="comparisonRows.length > 0"
-              class="chart-container"
-              :option="strategyRadar"
-              autoresize
-            />
-            <div v-else class="text-center pa-8 text-medium-emphasis">
-              Lancez une expérience pour voir le radar
-            </div>
-          </v-card-text>
-        </v-card>
-
-        <v-card>
+        <v-card class="mt-4">
           <v-card-title>
             <v-icon icon="mdi-console" class="mr-2" />
-            Logs d'Expérience
+            Journal du run
           </v-card-title>
-          <v-card-text style="max-height: 300px; overflow-y: auto;">
+          <v-card-text class="logs-card">
             <v-list density="compact">
               <v-list-item
                 v-for="(log, i) in experimentLogs"
@@ -359,6 +341,75 @@ function openRun(runId) {
             <div v-if="experimentLogs.length === 0" class="text-center text-medium-emphasis pa-4">
               Aucun log
             </div>
+          </v-card-text>
+        </v-card>
+      </v-col>
+
+      <v-col cols="12" lg="8">
+        <v-row class="mb-4" v-if="resultSummary">
+          <v-col cols="12" md="3">
+            <v-card class="summary-card">
+              <v-card-text>
+                <div class="summary-label">Meilleure stratégie</div>
+                <div class="summary-value">{{ resultSummary.bestStrategy }}</div>
+              </v-card-text>
+            </v-card>
+          </v-col>
+          <v-col cols="12" md="3">
+            <v-card class="summary-card">
+              <v-card-text>
+                <div class="summary-label">Recall moyen</div>
+                <div class="summary-value">{{ resultSummary.recall.toFixed(3) }}</div>
+              </v-card-text>
+            </v-card>
+          </v-col>
+          <v-col cols="12" md="3">
+            <v-card class="summary-card">
+              <v-card-text>
+                <div class="summary-label">Latence moyenne</div>
+                <div class="summary-value">{{ resultSummary.latency.toFixed(0) }} ms</div>
+              </v-card-text>
+            </v-card>
+          </v-col>
+          <v-col cols="12" md="3">
+            <v-card class="summary-card">
+              <v-card-text>
+                <div class="summary-label">Samples / skipped</div>
+                <div class="summary-value">{{ resultSummary.samples }} / {{ resultSummary.skipped }}</div>
+              </v-card-text>
+            </v-card>
+          </v-col>
+        </v-row>
+
+        <v-card class="mb-4">
+          <v-card-title class="d-flex align-center">
+            <v-icon icon="mdi-chart-bar" class="mr-2" />
+            Comparaison des Stratégies
+            <v-spacer />
+            <v-btn
+              v-if="comparisonRows.length > 0"
+              variant="text"
+              size="small"
+              prepend-icon="mdi-download"
+              @click="exportResults"
+            >
+              Exporter
+            </v-btn>
+          </v-card-title>
+          <v-card-text>
+            <v-alert
+              v-if="!store.experimentResults.comparison"
+              type="info"
+              variant="tonal"
+            >
+              Lance un benchmark pour comparer le rappel, le classement et la latence des stratégies de recherche.
+            </v-alert>
+            <v-chart
+              v-else
+              class="chart-container"
+              :option="comparisonChart"
+              autoresize
+            />
           </v-card-text>
         </v-card>
 
@@ -433,7 +484,47 @@ function openRun(runId) {
 </template>
 
 <style scoped>
+.experiments-view {
+  padding-bottom: 32px;
+}
+
 .cursor-pointer {
   cursor: pointer;
+}
+
+.experiments-alert {
+  max-width: 980px;
+}
+
+.config-card {
+  /* no sticky */
+}
+
+.logs-card {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.summary-card {
+  height: 100%;
+}
+
+.summary-label {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgba(var(--v-theme-on-surface), 0.62);
+}
+
+.summary-value {
+  margin-top: 8px;
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+@media (max-width: 1279px) {
+  .config-card {
+    position: static;
+  }
 }
 </style>
