@@ -22,6 +22,7 @@ const rightDocumentId = computed(() => run.value?.right_document_id || session.v
 const sessionModel = computed(() => run.value?.model || session.value?.model || 'openrouter/qwen/qwen3.5-9b:exacto')
 const sessionIndexName = computed(() => run.value?.index_name || session.value?.indexName || 'default')
 const compareMode = computed(() => result.value?.compare_mode || run.value?.config?.compare_mode || session.value?.compareMode || 'standard')
+const canResumeFromSession = computed(() => Boolean(session.value?.leftDocumentId && session.value?.rightDocumentId))
 
 const leftLayout = ref(session.value?.leftLayout || null)
 const rightLayout = ref(session.value?.rightLayout || null)
@@ -181,6 +182,32 @@ function backToSetup() {
   router.push({ name: 'compare' })
 }
 
+async function launchFromSession() {
+  if (!canResumeFromSession.value) return
+  rerunLoading.value = true
+  rerunError.value = ''
+  try {
+    const { data } = await compareApi.createRun({
+      left_document_id: session.value.leftDocumentId,
+      right_document_id: session.value.rightDocumentId,
+      model: session.value.model || sessionModel.value,
+      index_name: session.value.indexName || sessionIndexName.value,
+      strategy: session.value.strategy || rerunStrategy.value || 'hybrid',
+      compare_mode: session.value.compareMode || compareMode.value || 'adaptive',
+    })
+    syncSession({
+      runId: data.run_id,
+      status: data.status,
+      result: data.result || null,
+    })
+    await router.replace({ name: 'compare-result', params: { runId: data.run_id } })
+  } catch (e) {
+    rerunError.value = e.response?.data?.detail || e.message
+  } finally {
+    rerunLoading.value = false
+  }
+}
+
 async function rerunAnalyze() {
   if (!leftDocumentId.value || !rightDocumentId.value) return
   rerunLoading.value = true
@@ -210,6 +237,10 @@ async function rerunAnalyze() {
 }
 
 onMounted(() => {
+  if (!runId.value && canResumeFromSession.value) {
+    void launchFromSession()
+    return
+  }
   void loadRun()
 })
 
@@ -257,12 +288,28 @@ watch(selectedChange, (change) => {
     </div>
   </div>
 
-  <div v-else-if="!result && !showPendingState" class="empty-root">
+  <div v-else-if="!result && !showPendingState && !canResumeFromSession" class="empty-root">
     <div class="empty-card">
       <v-icon size="56" color="primary" icon="mdi-file-compare" />
       <h2 class="mt-4 text-h6 font-weight-bold">Aucune comparaison active</h2>
       <p class="text-body-2 text-medium-emphasis mt-1 mb-5">Sélectionne deux documents sur la page de préparation.</p>
       <v-btn color="primary" variant="flat" prepend-icon="mdi-arrow-left" @click="backToSetup">Retour</v-btn>
+    </div>
+  </div>
+
+  <div v-else-if="!result && !showPendingState && canResumeFromSession" class="empty-root">
+    <div class="empty-card">
+      <v-icon size="56" color="primary" icon="mdi-file-compare" />
+      <h2 class="mt-4 text-h6 font-weight-bold">Relancer la comparaison</h2>
+      <p class="text-body-2 text-medium-emphasis mt-1 mb-5">
+        La sélection existe encore en session, mais aucun run actif n’est chargé.
+      </p>
+      <div class="d-flex ga-3 justify-center flex-wrap">
+        <v-btn color="primary" variant="flat" prepend-icon="mdi-refresh" :loading="rerunLoading" @click="launchFromSession">
+          Relancer avec ces documents
+        </v-btn>
+        <v-btn color="default" variant="tonal" prepend-icon="mdi-arrow-left" @click="backToSetup">Retour</v-btn>
+      </div>
     </div>
   </div>
 

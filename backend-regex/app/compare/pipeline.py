@@ -980,8 +980,8 @@ class CompareDocumentsPipeline:
         )
         return changes[:max_changes]
 
-    @staticmethod
     def _should_keep_pair_as_change(
+        self,
         pair: dict[str, Any],
         diff: dict[str, Any],
         left_text: str,
@@ -1401,7 +1401,10 @@ class CompareDocumentsPipeline:
             return f"Numeric value changed from '{left_raw}' to '{right_raw}'."
         if subtype == "reference_change":
             return f"Reference changed from '{left_raw}' to '{right_raw}'."
-        return "The aligned blocks differ textually between the two documents."
+        change_focus = CompareDocumentsPipeline._diff_focus_summary(diff.get("lexical_diff_ops") or [])
+        if change_focus:
+            return change_focus
+        return "Le libellé ou la formulation de cette clause a été modifié."
 
     @staticmethod
     def _importance_for_subtype(subtype: str) -> str:
@@ -1427,6 +1430,7 @@ class CompareDocumentsPipeline:
             return "", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         payload = []
         for change in changes[:10]:
+            structured = (change.get("structured_diffs") or [{}])[0]
             payload.append(
                 {
                     "title": change.get("title"),
@@ -1437,21 +1441,30 @@ class CompareDocumentsPipeline:
                     "left_page": change.get("left_page"),
                     "right_page": change.get("right_page"),
                     "discovery_mode": change.get("discovery_mode"),
-                    "left_raw": str(change.get("left_raw") or "")[:120],
-                    "right_raw": str(change.get("right_raw") or "")[:120],
+                    "left_raw": self._shorten_for_summary(change.get("left_raw") or ""),
+                    "right_raw": self._shorten_for_summary(change.get("right_raw") or ""),
+                    "change_focus": self._diff_focus_summary(change.get("lexical_diff_ops") or []),
+                    "normalized_left": self._shorten_for_summary(structured.get("left_normalized") or ""),
+                    "normalized_right": self._shorten_for_summary(structured.get("right_normalized") or ""),
+                    "pairing_reason": change.get("pairing_reason"),
                 }
             )
         prompt = (
             "Tu es un analyste de comparaison documentaire.\n"
-            "Ta tâche: résumer les changements détectés entre deux documents et mettre en avant les plus importants.\n"
+            "Ta tâche: résumer et interpréter les changements détectés entre deux documents.\n"
             "Règles:\n"
             "- Réponds en français.\n"
-            "- Retourne 2 à 4 puces courtes maximum.\n"
+            "- Retourne 2 à 4 puces maximum.\n"
             "- Commence par les changements HIGH ou CRITICAL s'il y en a.\n"
-            "- Mentionne explicitement les changements importants: dates, montants, références, ajouts ou suppressions significatifs.\n"
-            "- Si plusieurs micro-changements existent, regroupe-les en une seule puce concise.\n"
+            "- Pour chaque puce importante, dis d'abord ce qui a changé précisément.\n"
+            "- Si le changement porte sur un mot, un verbe, une date, un nombre, une référence ou une formulation clé, mentionne-le explicitement.\n"
+            "- Explique ensuite en une phrase courte ce que ce changement implique pour le sens de la clause.\n"
+            "- Si une conséquence ou un risque contractuel plausible existe, mentionne-le brièvement avec prudence: 'peut', 'risque', 'pourrait'.\n"
+            "- N'invente pas de risque si le changement est purement cosmétique ou insuffisant pour conclure.\n"
+            "- Si plusieurs micro-changements existent dans une même zone, regroupe-les en une seule puce interprétable.\n"
             "- Pas d'introduction. Pas de conclusion. Pas de JSON.\n"
-            "- Chaque puce doit être utile produit, pas technique.\n"
+            "- Chaque puce doit être utile pour un client métier, pas technique.\n"
+            "- Évite les formules vagues comme 'les blocs diffèrent textuellement'.\n"
             f"CHANGES:\n{json.dumps(payload, ensure_ascii=False)}"
         )
         try:
@@ -1479,7 +1492,55 @@ class CompareDocumentsPipeline:
             ),
         )
         top = ranked[:3]
-        return "\n".join(f"- {item.get('title')}: {item.get('summary')}" for item in top)
+        return "\n".join(
+            f"- {item.get('title')}: {self._deterministic_change_explanation(item)}"
+            for item in top
+        )
+
+    @staticmethod
+    def _shorten_for_summary(value: Any, limit: int = 180) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1].rstrip() + "…"
+
+    @staticmethod
+    def _diff_focus_summary(diff_ops: list[dict[str, Any]]) -> str:
+        deletes = [str(item.get("text") or "").strip() for item in diff_ops if item.get("op") == "delete" and str(item.get("text") or "").strip()]
+        inserts = [str(item.get("text") or "").strip() for item in diff_ops if item.get("op") == "insert" and str(item.get("text") or "").strip()]
+        if not deletes and not inserts:
+            return ""
+        left = re.sub(r"\s+", " ", " ".join(deletes)).strip()
+        right = re.sub(r"\s+", " ", " ".join(inserts)).strip()
+        left = CompareDocumentsPipeline._shorten_for_summary(left, limit=72)
+        right = CompareDocumentsPipeline._shorten_for_summary(right, limit=72)
+        if left and right:
+            return f"Le texte passe de '{left}' à '{right}'."
+        if right:
+            return f"Le texte ajoute '{right}'."
+        if left:
+            return f"Le texte supprime '{left}'."
+        return ""
+
+    def _deterministic_change_explanation(self, change: dict[str, Any]) -> str:
+        subtype = str(change.get("change_subtype") or "")
+        structured = (change.get("structured_diffs") or [{}])[0]
+        left = self._shorten_for_summary(structured.get("left_normalized") or change.get("left_raw") or "", limit=72)
+        right = self._shorten_for_summary(structured.get("right_normalized") or change.get("right_raw") or "", limit=72)
+        focus = self._diff_focus_summary(change.get("lexical_diff_ops") or [])
+
+        if subtype == "date_change" and left and right:
+            return f"La date passe de '{left}' à '{right}', ce qui modifie la temporalité de la clause."
+        if subtype == "numeric_change" and left and right:
+            return f"La valeur passe de '{left}' à '{right}', ce qui peut modifier la portée financière ou quantitative de l'obligation."
+        if subtype == "reference_change" and left and right:
+            return f"La référence passe de '{left}' à '{right}', ce qui peut renvoyer à une base juridique ou documentaire différente."
+        if focus:
+            return f"{focus} Cela peut changer le sens ou la portée de la clause."
+        summary = str(change.get("summary") or "").strip()
+        if summary:
+            return summary
+        return "La formulation de cette clause a changé, ce qui peut modifier son interprétation."
 
     def _change_to_issue(self, change: dict[str, Any], index: int, strategy: str) -> dict[str, Any]:
         return {
