@@ -4,7 +4,7 @@ __pycache__/
 *.pyo
 *.egg-info/
 .venv/
-docs-regex/
+docs-regex/ 
 # Env & secrets
 .env
 .env.*
